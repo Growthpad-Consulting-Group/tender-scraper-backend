@@ -31,6 +31,35 @@ def add_keyword():
     finally:
         cur.close()
         conn.close()
+
+# Add bulk keywords
+@keyword_bp.route('/api/keywords/bulk', methods=['POST'])
+def add_bulk_keywords():
+    data = request.json
+    keywords = data.get('keywords')
+
+    if not keywords or not isinstance(keywords, list) or not all(isinstance(k, str) for k in keywords):
+        return jsonify({"msg": "Please provide a list of keywords"}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        # Insert the keywords into the database
+        cur.executemany("INSERT INTO keywords (keyword) VALUES (%s) RETURNING id", [(k,) for k in keywords])
+        keyword_ids = cur.fetchall()
+        conn.commit()
+
+        return jsonify({"msg": "Keywords added successfully", "keyword_ids": [id[0] for id in keyword_ids]}), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"msg": "Error adding keywords", "error": str(e)}), 500
+
+    finally:
+        cur.close()
+        conn.close()
+
 # Get all keywords
 @keyword_bp.route('/api/keywords', methods=['GET'])
 def get_keywords():
