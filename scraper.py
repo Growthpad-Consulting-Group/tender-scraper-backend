@@ -9,14 +9,14 @@ from config import get_db_connection
 from docx import Document  # Import for reading .docx files
 
 def extract_closing_dates(text):
-    # Define a pattern to find various date formats, including submission deadline
-    closing_keywords = r"(closing date|submitted by|not later than|closes on|submit by|deadline for submission|deadline for submission of bids|deadline|submit before|expiry date|due date|final submission|end date|submission date|last date to submit|submission deadline|final date|Submission Deadline|SUBMISSION DEADLINE|Deadline for sending application)"
-    date_formats = r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\w+\s+\d{1,2},\s+\d{4}|\d{1,2} \w+ \d{4}|(\d{1,2}(?:th|st|nd|rd)?\s+\w+\s+\d{4})|(\w+\s+\d{1,2},\s+\d{4})|\d{1,2} \w+ \d{4}|\d{1,2} \w+ \d{2,4})"
-
-    pattern = rf"{closing_keywords}[\s:]*{date_formats}"
+    closing_keywords = r"(closing date|submit by|deadline|expiry date|due date|last date to submit)"
+    date_formats = r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\w+\s+\d{1,2},\s+\d{4}|\d{1,2} \w+ \d{4})"
+    pattern = rf"{closing_keywords}[\s:]*({date_formats})"
 
     matches = re.findall(pattern, text, re.IGNORECASE)
-    dates = [(match[1], match[0]) for match in matches]  # Extract both date and keyword
+    for match in matches:
+        print(f"Matched: {match}")  # Debugging output
+    dates = [(match[1], match[0]) for match in matches]
     return dates
 
 def clean_date_string(date_str):
@@ -82,7 +82,7 @@ def scrape_tenders(search_engines, keywords):
                     title = link.get_text(strip=True)
 
                     valid_url = is_valid_url(href, search_url)
-                    if not valid_url or 'google.com' in valid_url or 'microsoft.com' in valid_url or 'tendersontime.com' in valid_url or 'tenderimpulse.com' in valid_url:
+                    if not valid_url or 'google.com' in valid_url or 'microsoft.com' in valid_url or 'tendersontime.com' in valid_url or 'tenderimpulse.com' in valid_url or 'biddingsource.com' in valid_url:
                         print(f"Skipping internal link or ad: {href}")
                         continue
 
@@ -189,57 +189,3 @@ def insert_tender_to_db(tender_info):
     finally:
         cur.close()
         conn.close()
-
-def fetch_reliefweb_jobs():
-    api_url = "https://api.reliefweb.int/v1/jobs"
-    params = {
-        "appname": "ReliefWebKenyaScrape",
-        "profile": "list",
-        "preset": "latest",
-        "query[value]": "theme.id:4588 AND country.id:131",
-        "query[operator]": "AND",
-        "limit": 20
-    }
-    response = requests.get(api_url, params=params)
-    if response.status_code == 200:
-        jobs = response.json()
-        return jobs['data']  # Adjust based on the actual JSON structure
-    else:
-        print(f"Failed to fetch jobs: {response.status_code}")
-        return []
-
-def scrape_jobs_from_reliefweb():
-    jobs = fetch_reliefweb_jobs()
-    for job in jobs:
-        title = job['fields']['title']
-        url = job['fields']['url']
-        closing_date_str = job['fields']['closing_date']
-
-        try:
-            closing_date_parsed = parse_closing_date(closing_date_str)
-            tender_status = "Open" if closing_date_parsed > datetime.now().date() else "Closed"
-
-            tender_info = {
-                'title': title,
-                'closing_date': closing_date_parsed,
-                'source_url': url,
-                'status': tender_status,
-                'format': 'API',
-                'scraped_at': datetime.now().date()
-            }
-
-            insert_tender_to_db(tender_info)
-
-        except ValueError as ve:
-            print(str(ve))
-            continue  # Skip this job if date parsing fails
-
-if __name__ == "__main__":
-    search_engines = ["Google"]  # Add more search engines if needed
-    keywords = ["tender", "proposal", "RFP"]  # Add your keywords here
-
-    # Scrape tenders from search engines
-    scrape_tenders(search_engines, keywords)
-
-    # Scrape jobs from ReliefWeb API
-    scrape_jobs_from_reliefweb()
