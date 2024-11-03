@@ -7,15 +7,17 @@ from keyword_routes import keyword_bp
 from user_preferences_routes import user_preferences_bp  # Import the new blueprint
 from upload_routes import upload_bp  # Import the new blueprint
 from scraper import scrape_tenders  # Import the scraping function
+from datetime import datetime
 
 import requests
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})  # Allow your frontend origin
+CORS(app)  # This will allow all origins
 
 # JWT setup
 app.config['JWT_SECRET_KEY'] = 'your_secret_key'  # Change this to a strong secret key
 jwt = JWTManager(app)
+
 
 # User login route
 @app.route('/login', methods=['POST'])
@@ -73,12 +75,14 @@ def login():
     cur.close()
     conn.close()
 
+
 # Protected route for dashboard
 @app.route('/dashboard', methods=['GET'])
 @jwt_required()
 def dashboard():
     current_user = get_jwt_identity()
     return jsonify(logged_in_as=current_user), 200
+
 
 # New endpoint for scraping tenders
 @app.route('/api/scrape', methods=['POST'])
@@ -89,13 +93,27 @@ def scrape():
 
     # Fetch keywords from the database
     cur.execute("SELECT keyword FROM keywords")
-    keywords = [row[0] for row in cur.fetchall()]
+    db_keywords = [row[0] for row in cur.fetchall()]
+
+    # Define predefined search terms
+    predefined_search_terms = ["rfp", "tender", "rfq", "contract", "bid", "procurement", "solicitation",
+                               "request for proposal", "request for quotation", "request for `bid"]
+
+    # Get the current year
+    current_year = datetime.now().year
+
+    # Combine predefined search terms with database keywords and add the current year
+    queries = []
+    for keyword in db_keywords:
+        # Create a query for each database keyword
+        query = f"{keyword} {current_year} " + " OR ".join(predefined_search_terms)
+        queries.append(query)
 
     # Define the search engines to be used
     search_engines = ["Google", "Bing", "Yahoo", "DuckDuckGo", "Ask"]
 
     # Call the scraping function with search engines and keywords
-    tenders = scrape_tenders(search_engines, keywords)
+    tenders = scrape_tenders(search_engines, queries)
 
     return jsonify({"msg": "Scraping completed", "tenders_found": len(tenders)}), 200
 
