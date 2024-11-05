@@ -47,3 +47,8 @@ config.py
 # Package manager files (e.g., for poetry or pipenv)
 Pipfile.lock
 poetry.lock
+
+# Project-specific files to ignore
+*.iml      # IntelliJ IDEA project files
+*.log      # Log files
+*.pdf      # PDF files (temporary or generated)
