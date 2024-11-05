@@ -22,6 +22,31 @@ def insert_tender_to_db(tender_info, db_connection):
 
         conn.commit()
 
+def get_keywords_and_terms(db_connection):
+    """Retrieves keywords and their associated search terms from the database."""
+    with closing(db_connection) as conn:
+        cur = conn.cursor()
+
+        # SQL to get all keywords
+        cur.execute("SELECT id, keyword FROM keywords")
+        keywords = cur.fetchall()
+
+        # SQL to get all search terms
+        cur.execute("SELECT term FROM search_terms")
+        search_terms = [row[0] for row in cur.fetchall()]
+
+        # Create a list to hold keyword data
+        keyword_data = []
+
+        for keyword_id, keyword_text in keywords:
+            keyword_data.append({
+                'id': keyword_id,
+                'keyword': keyword_text,
+                'terms': search_terms  # Include all search terms
+            })
+
+        return keyword_data
+
 def create_tables():
     """Creates the necessary tables in the database."""
     connection = get_db_connection()
@@ -29,7 +54,7 @@ def create_tables():
         cur = conn.cursor()
 
         # SQL to create the tenders table if it doesn't exist
-        cur.execute('''
+        cur.execute(''' 
             CREATE TABLE IF NOT EXISTS tenders (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
