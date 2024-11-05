@@ -80,6 +80,7 @@ def run_all_scraping():
         scrape_treasury_ke_tenders,
         scrape_undp_tenders,
         scrape_tenders_from_websites,
+        scrape_tenders,
     ]
 
     for scrape_func in scraping_functions:
