@@ -68,3 +68,4 @@ def update_user_preferences():
     finally:
         cur.close()
         conn.close()
+        
