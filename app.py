@@ -22,6 +22,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 import requests
 import logging
+from threading import Thread
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)  # Allow credentials for your requests
@@ -137,14 +138,16 @@ scheduler.start()
 @app.route('/api/run-scan', methods=['POST'])
 @jwt_required()
 def run_scan():
-    data = request.get_json()
-    tender_types = data.get('tenderTypes', [])  # Expecting list of tender types
+    try:
+        # Start the scraping process in a separate thread
+        thread = Thread(target=scrape_tenders_from_websites)
+        thread.start()
 
-    # Start the scraping in a separate thread
-    socketio.start_background_task(run_scraping_with_progress, tender_types)
-    return jsonify({"msg": "Scan started."}), 202
-
-
+        return jsonify({"msg": "Scraping started."}), 202  # Acknowledge the request
+    except Exception as e:
+        logging.error(f"Error starting scrape: {e}")
+        return jsonify({"msg": "Error starting scrape."}), 500
+    
 # Route to get all scraping tasks
 @app.route('/api/scraping-tasks', methods=['GET'])
 @jwt_required()
@@ -404,6 +407,41 @@ def get_task_logs(task_id):
         })
 
     return jsonify({"logs": logs_list}), 200
+
+
+# Route to fetch all task logs for the authenticated user
+@app.route('/api/all-task-logs', methods=['GET'])
+@jwt_required()
+def get_all_task_logs():
+    current_user = get_jwt_identity()
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        # Fetch all logs for the current user
+        cur.execute("SELECT task_id, log_entry, created_at FROM task_logs WHERE user_id = %s", (current_user,))
+        logs = cur.fetchall()
+
+        if not logs:
+            return jsonify({"msg": "No logs found for this user."}), 404  # Return a 404 if there are no logs
+
+        logs_list = []
+        for log in logs:
+            logs_list.append({
+                "task_id": log[0],  # Include task_id for reference
+                "log_entry": log[1],
+                "created_at": log[2]  # Add the created_at field to the response
+            })
+
+        return jsonify({"logs": logs_list}), 200
+
+    except Exception as e:
+        logging.error("Error fetching logs: %s", str(e))
+        return jsonify({"error": "An error occurred while fetching logs."}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 # Route to cancel a scheduled task
 @app.route('/api/cancel-task/<int:task_id>', methods=['DELETE'])
