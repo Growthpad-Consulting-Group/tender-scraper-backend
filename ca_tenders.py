@@ -4,6 +4,14 @@ from datetime import datetime
 from config import get_db_connection  # Import the function to get a database connection
 from utils import insert_tender_to_db  # Import the utility function for database insertion
 
+def get_format(url):
+    """Determine the document format based on the URL."""
+    if url.lower().endswith('.pdf'):
+        return 'PDF'
+    elif url.lower().endswith('.docx'):
+        return 'DOCX'
+    return 'HTML'  # Default to HTML if no specific format is found
+
 def scrape_ca_tenders():
     """Scrapes tenders from the CA Kenya website and inserts them into the database."""
     url = "https://www.ca.go.ke/open-tenders"
@@ -52,7 +60,10 @@ def scrape_ca_tenders():
                 print(f"Closing date for tender '{title}': {closing_date}")
 
                 # Determine the status based on the closing date
-                status = "Open" if closing_date > datetime.now().date() else "Closed"
+                status = "open" if closing_date > datetime.now().date() else "closed"
+
+                # Determine the document format
+                format_type = get_format(source_url) if source_url else "N/A"
 
                 tender_data = {
                     'title': title,
@@ -60,8 +71,9 @@ def scrape_ca_tenders():
                     'closing_date': closing_date,
                     'source_url': source_url if source_url else "N/A",
                     'status': status,
-                    'format': "HTML",
-                    'scraped_at': datetime.now().date()
+                    'format': format_type,  # Update to use determined format
+                    'scraped_at': datetime.now().date(),
+                    'tender_type': "CA Tenders"  # Mapping the tender type
                 }
 
                 # Insert the tender into the database with db_connection
@@ -72,7 +84,8 @@ def scrape_ca_tenders():
                       f"Closing Date: {closing_date}\n"
                       f"Status: {status}\n"
                       f"Source URL: {source_url}\n"
-                      f"Format: HTML\n")  # Added format
+                      f"Format: {format_type}\n"  # Display the determined format
+                      f"Tender Type: CA Tenders\n")  # Display the tender type
                 print("=" * 40)  # Separator for readability
 
             except ValueError as e:

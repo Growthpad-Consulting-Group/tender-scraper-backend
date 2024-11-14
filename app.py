@@ -139,8 +139,15 @@ scheduler.start()
 @jwt_required()
 def run_scan():
     try:
+        # Extract data from the request
+        data = request.json
+        selected_engines = data.get('engines')
+        time_frame = data.get('timeFrame')
+        file_type = data.get('fileType')
+        terms = data.get('terms')
+
         # Start the scraping process in a separate thread
-        thread = Thread(target=scrape_tenders_from_websites)
+        thread = Thread(target=scrape_tenders_from_websites, args=(selected_engines, time_frame, file_type, terms))
         thread.start()
 
         return jsonify({"msg": "Scraping started."}), 202  # Acknowledge the request
@@ -246,7 +253,7 @@ def get_tenders():
             cur.execute(query, query_params)
             tenders = cur.fetchall()
 
-            logging.info(f"Tenders fetched from DB: {tenders}")  # Log fetched tenders
+            # logging.info(f"Tenders fetched from DB: {tenders}")  # Log fetched tenders
 
         elif request.method == 'GET':
             start_date = request.args.get('startDate')

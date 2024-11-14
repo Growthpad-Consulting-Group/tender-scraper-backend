@@ -4,6 +4,14 @@ from datetime import datetime
 from config import get_db_connection
 from utils import insert_tender_to_db
 
+def get_format(url):
+    """Determine the document format based on the URL."""
+    if url.lower().endswith('.pdf'):
+        return 'PDF'
+    elif url.lower().endswith('.docx'):
+        return 'DOCX'
+    return 'HTML'  # Default to HTML if no specific format is found
+
 def scrape_jobinrwanda_tenders():
     """Scrapes tenders from Job in Rwanda website and inserts them into the database."""
     url = "https://www.jobinrwanda.com/jobs/tender"
@@ -51,7 +59,10 @@ def scrape_jobinrwanda_tenders():
 
                 if closing_date_str:
                     closing_date = datetime.fromisoformat(closing_date_str.replace('Z', '+00:00')).date()
-                    status = "Open" if closing_date > datetime.now().date() else "Closed"
+                    status = "open" if closing_date > datetime.now().date() else "closed"
+
+                    # Determine the format based on the source URL
+                    format_type = get_format(source_url)
 
                     tender_data = {
                         'title': title,
@@ -59,8 +70,9 @@ def scrape_jobinrwanda_tenders():
                         'closing_date': closing_date,
                         'source_url': source_url,
                         'status': status,
-                        'format': "HTML",
-                        'scraped_at': datetime.now().date()
+                        'format': format_type,  # Set format based on URL
+                        'scraped_at': datetime.now().date(),
+                        'tender_type': "Job in Rwanda"  # Specifying the tender type
                     }
 
                     # Insert the tender into the database
@@ -71,7 +83,8 @@ def scrape_jobinrwanda_tenders():
                           f"Closing Date: {closing_date}\n"
                           f"Status: {status}\n"
                           f"Source URL: {source_url}\n"
-                          f"Format: HTML\n")
+                          f"Format: {format_type}\n"  # Display the determined format
+                          f"Tender Type: Job in Rwanda\n")
                     print("=" * 40)
                 else:
                     print(f"Closing date not found for tender '{title}'.")

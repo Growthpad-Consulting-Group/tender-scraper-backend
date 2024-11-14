@@ -7,16 +7,15 @@ from db import insert_tender_to_db, get_keywords_and_terms
 from utils import (
     extract_closing_dates,
     parse_closing_date,
-    is_valid_url,
     get_format,
     extract_pdf_text,
     extract_docx_text,
     construct_search_url,
-    extract_description_from_response  # Add this line
-
+    extract_description_from_response
 )
 import random
 import time
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -41,11 +40,9 @@ SEARCH_ENGINES = [
 
 def scrape_tenders(db_connection, query, search_engines):
     """Scrapes tenders from specified search engines using keywords from the database."""
-
     tenders = []
-    current_year = datetime.now().year
 
-    for engine in SEARCH_ENGINES:
+    for engine in search_engines:
         search_url = construct_search_url(engine, query)
         logging.info(f"Constructed Search URL for engine '{engine}': {search_url}")
 
@@ -60,13 +57,26 @@ def scrape_tenders(db_connection, query, search_engines):
             response = requests.get(search_url, headers=headers)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Extract links based on the search engine
             links = soup.find_all('a', href=True)
-
             for link in links:
-                process_link(link, response, headers, current_year, db_connection, tenders)
+                href = link['href']
+                actual_url = extract_actual_link_from_search_result(href, engine)
 
-            if len(tenders) > 0:  # Stop trying other engines if we found tenders
-                break
+                # Skip Google internal pages
+                if "google.com" in actual_url:
+                    logging.info(f"Ignored Google internal page: {actual_url}")
+                    continue
+
+                # Check if the extracted URL is valid before scraping
+                if is_valid_url(actual_url):
+                    logging.info(f"Visiting URL: {actual_url}")  # Log the URL being visited
+                    tender_details = scrape_tender_details(actual_url, headers, db_connection)
+                    if tender_details:
+                        tenders.append(tender_details)
+                else:
+                    logging.error(f"Ignored invalid URL: {actual_url}")  # Log ignored invalid URLs
 
         except requests.exceptions.HTTPError as http_err:
             if http_err.response.status_code == 429:
@@ -78,81 +88,75 @@ def scrape_tenders(db_connection, query, search_engines):
 
     return tenders
 
-def construct_search_query(keyword, search_terms, current_year):
-    """Constructs a search query string."""
-    terms_query = " OR ".join([term.strip() for term in search_terms if term.strip()])
-    return f"{keyword} {terms_query} {current_year}" if terms_query else f"{keyword} {current_year}"
+def extract_actual_link_from_search_result(href, engine):
+    """Extracts the actual tender link from the search engine result."""
+    if engine in ['Google', 'Bing', 'Yahoo']:  # Logic for extracting from common search engines
+        match = re.search(r'q=(.+?)(&|$)', href)
+        if match:
+            return match.group(1)  # Actual URL
+    return href  # If not matched, return the href as is
 
-def process_link(link, response, headers, current_year, db_connection, tenders):
-    """Processes each link found in the search result."""
-    href = link['href']
+def is_valid_url(url):
+    """Check if the URL is valid and begins with http or https."""
+    return re.match(r'https?://', url) is not None
 
-    # Extract just the visible text of the link as the title
-    title = link.get_text(strip=True)
-
-    base_url = "https://www.google.com"
-    valid_url = is_valid_url(href, base_url)
-
-    if valid_url is None:
-        logging.debug(f"Link skipped (invalid): {href}")
-        return
-
-    # Add delay before accessing the valid URL
+def scrape_tender_details(url, headers, db_connection):
+    """Scrape the actual tender details from the specific URL."""
     time.sleep(random.uniform(1, 3))
-
     try:
-        response = requests.get(valid_url, headers=headers, allow_redirects=True)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
-    except requests.RequestException as e:
-        logging.warning(f"Failed to access URL: {valid_url}. Error: {e}")
-        return
+        format_type = get_format(url)
+        closing_dates = extract_closing_dates_from_content(response, format_type)
 
-    format_type = get_format(valid_url)
-    closing_dates = extract_closing_dates_from_content(response, format_type)
+        if closing_dates:
+            # Extract title from the response content
+            soup = BeautifulSoup(response.content, 'html.parser')
+            title = soup.title.string if soup.title else url  # Use page title or URL if not found
+            for date, keyword in closing_dates:
+                try:
+                    closing_date_parsed = parse_closing_date(date)
+                    tender_info = {
+                        'title': title,  # Use the extracted title
+                        'description': extract_description_from_response(response, format_type),
+                        'closing_date': closing_date_parsed,
+                        'source_url': url,
+                        'status': "open" if closing_date_parsed > datetime.now().date() else "closed",
+                        'format': format_type,
+                        'scraped_at': datetime.now().date(),
+                        'tender_type': 'Uploaded Websites'  # Modify this if you have specific type logic
+                    }
 
-    if closing_dates:
-        for date, keyword in closing_dates:
-            try:
-                closing_date_parsed = parse_closing_date(date)
-                tender_info = {
-                    'title': title,  # Extracted title should only be the visible text
-                    'description': extract_description_from_response(response, format_type),
-                    'closing_date': closing_date_parsed,
-                    'source_url': valid_url,
-                    'status': "open" if closing_date_parsed > datetime.now().date() else "closed",
-                    'format': format_type,
-                    'scraped_at': datetime.now().date(),
-                    # Tender type defined here
-                    'tender_type': 'Uploaded Websites'
-                }
+                    logging.info("====================================")
+                    logging.info("Found Tender")
+                    logging.info(f"Tender Title: {tender_info['title']}")
+                    logging.info(f"Closing Date: {closing_date_parsed}")
+                    logging.info(f"Closing Date Keyword Found: {keyword}")
+                    logging.info(f"Status: {tender_info['status']}")
+                    logging.info(f"Tender Type: {tender_info['tender_type']}")
+                    logging.info("====================================")
 
-                logging.info("====================================")
-                logging.info("Found Tender")
-                logging.info(f"Tender Title: {tender_info['title']}")
-                logging.info(f"Closing Date: {closing_date_parsed}")
-                logging.info(f"Closing Date Keyword Found: {keyword}")
-                logging.info(f"Status: {tender_info['status']}")
-                logging.info(f"Tender Type: {tender_info['tender_type']}")  # Log Type of Tender
-                logging.info("====================================")
+                    try:
+                        # Attempt to insert the tender into the database
+                        insertion_status = insert_tender_to_db(tender_info, db_connection)
+                        if insertion_status:
+                            logging.info("==========")
+                            logging.info("Inserting into database: Success")
+                            logging.info("==========")
+                        else:
+                            logging.error("==========")
+                            logging.error("Inserting into database: Failed")
+                            logging.error("==========")
 
-                insertion_status = insert_tender_to_db(tender_info, db_connection)
+                    except Exception as e:
+                        logging.error(f"Error inserting tender into database: {str(e)}")
 
-                if insertion_status:
-                    logging.info("==========")
-                    logging.info("Inserting into database: Success")
-                    logging.info("==========")
-                else:
-                    logging.error("==========")
-                    logging.error("Inserting into database: Failed")
-                    logging.error("==========")
-
-                tenders.append(tender_info)
-            except ValueError as ve:
-                logging.error(f"Error parsing date for '{title}': {str(ve)}")
-    else:
-        logging.debug(f"No closing date found for: {title}. Skipping.")
-
-
+                    return tender_info
+                except ValueError as ve:
+                    logging.error(f"Error parsing date for tender from '{url}': {str(ve)}")
+    except Exception as e:
+        logging.error(f"Could not scrape the tender details from {url}: {str(e)}")
+    return None
 
 def extract_closing_dates_from_content(response, format_type):
     """Extracts closing dates based on the content format."""
@@ -162,14 +166,19 @@ def extract_closing_dates_from_content(response, format_type):
     elif format_type == 'DOCX':
         docx_text = extract_docx_text(response.content)
         return extract_closing_dates(docx_text)
-    else:
+    else:  # Assuming it's HTML
         soup = BeautifulSoup(response.content, 'html.parser')
         page_text = soup.get_text()
         return extract_closing_dates(page_text)
 
 if __name__ == "__main__":
     db_connection = get_db_connection()
-    query = construct_search_query("tender", get_keywords_and_terms(), datetime.now().year)
-    scraped_tenders = scrape_tenders(db_connection, query, search_engines)
-    logging.info(f"Scraped tenders: {scraped_tenders}")
-
+    try:
+        query = construct_search_query("tender", get_keywords_and_terms(), datetime.now().year)
+        scraped_tenders = scrape_tenders(db_connection, query, SEARCH_ENGINES)
+        logging.info(f"Scraped tenders: {scraped_tenders}")
+    finally:
+        # Ensure the database connection is closed properly
+        if db_connection:
+            db_connection.close()
+            logging.info("Database connection closed.")

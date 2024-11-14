@@ -5,10 +5,19 @@ from bs4 import BeautifulSoup
 from config import get_db_connection
 from utils import insert_tender_to_db
 
+def get_format(url):
+    """Determine the document format based on the URL."""
+    if url.lower().endswith('.pdf'):
+        return 'PDF'
+    elif url.lower().endswith('.docx'):
+        return 'DOCX'
+    return 'HTML'  # Default to HTML if no specific format is found
+
 def scrape_undp_tenders():
     """Scrapes tenders from the UNDP procurement notices page and inserts them into the database."""
     url = "https://procurement-notices.undp.org/"
 
+    db_connection = None  # Initialize db_connection at the start
     try:
         response = requests.get(url)
 
@@ -23,7 +32,8 @@ def scrape_undp_tenders():
         tenders = soup.find_all('a', class_='vacanciesTableLink')
         print(f"Found {len(tenders)} tenders.")
 
-        db_connection = get_db_connection()  # Get the database connection
+        # Establish a database connection
+        db_connection = get_db_connection()
 
         for tender in tenders:
             title_label = tender.find('div', class_='vacanciesTable__cell__label', string=lambda x: x and 'Title' in x.strip())
@@ -53,9 +63,12 @@ def scrape_undp_tenders():
                 print(f"Error parsing deadline date for tender '{title}': {e}")
                 continue
 
-            status = "Open" if deadline_date > datetime.now().date() else "Closed"
+            status = "open" if deadline_date > datetime.now().date() else "closed"
             negotiation_id = tender['href'].split('=')[-1]
             source_url = f"https://procurement-notices.undp.org/view_negotiation.cfm?nego_id={negotiation_id}"
+
+            # Determine the document format
+            format_type = get_format(source_url)
 
             tender_data = {
                 'title': title,
@@ -63,18 +76,21 @@ def scrape_undp_tenders():
                 'closing_date': deadline_date,
                 'source_url': source_url,
                 'status': status,
-                'format': "HTML",
-                'scraped_at': datetime.now().date()
+                'format': format_type,  # Use the determined format type
+                'scraped_at': datetime.now().date(),
+                'tender_type': "UNDP"  # Adding tender type
             }
 
             try:
                 insert_tender_to_db(tender_data, db_connection)  # Insert into the database
                 print(f"Tender inserted into database: {title}")
                 print(f"Title: {title}\n"
-                      f"Organization: {reference_number}\n"
+                      f"Reference Number: {reference_number}\n"
                       f"Closing Date: {deadline_date}\n"
                       f"Status: {status}\n"
-                      f"Format: HTML\n")
+                      f"Source URL: {source_url}\n"  # Include the URL in logs
+                      f"Format: {format_type}\n"  # Display the determined format
+                      f"Tender Type: UNDP\n")  # Display the tender type
                 print("=" * 40)  # Separator for readability
             except Exception as e:
                 print(f"Error inserting tender '{title}' into database: {e}")
@@ -84,7 +100,8 @@ def scrape_undp_tenders():
     except Exception as e:
         print(f"An error occurred while scraping: {e}")
     finally:
-        db_connection.close()  # Ensure the connection is closed
+        if db_connection:  # Ensure the connection is closed if it was opened
+            db_connection.close()
 
 if __name__ == "__main__":
     scrape_undp_tenders()

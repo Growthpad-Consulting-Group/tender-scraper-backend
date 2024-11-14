@@ -6,51 +6,51 @@ import logging
 
 def insert_tender_to_db(tender_info, db_connection):
     """Inserts or updates tender information into the database."""
-    with closing(db_connection) as conn:
-        cur = conn.cursor()
+    cur = db_connection.cursor()
 
-        # Ensure status is set correctly
-        current_date = datetime.now().date()
-        tender_info['status'] = 'open' if tender_info['closing_date'] > current_date else 'closed'
+    # Ensure status is set correctly
+    current_date = datetime.now().date()
+    tender_info['status'] = 'open' if tender_info['closing_date'] > current_date else 'closed'
 
-        # SQL query to insert or update tender information
-        insert_sql = '''  
-            INSERT INTO tenders (title, description, closing_date, source_url, status, scraped_at, format, tender_type)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(source_url) DO UPDATE SET
-                title = EXCLUDED.title,
-                description = EXCLUDED.description,
-                closing_date = EXCLUDED.closing_date,
-                status = EXCLUDED.status,
-                format = EXCLUDED.format,
-                scraped_at = EXCLUDED.scraped_at,
-                tender_type = EXCLUDED.tender_type
-        '''
+    # SQL query to insert or update tender information
+    insert_sql = '''  
+        INSERT INTO tenders (title, description, closing_date, source_url, status, scraped_at, format, tender_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT(source_url) DO UPDATE SET
+            title = EXCLUDED.title,
+            description = EXCLUDED.description,
+            closing_date = EXCLUDED.closing_date,
+            status = EXCLUDED.status,
+            format = EXCLUDED.format,
+            scraped_at = EXCLUDED.scraped_at,
+            tender_type = EXCLUDED.tender_type
+    '''
 
-        # Prepare parameters for insertion
-        params = (
-            tender_info['title'],
-            tender_info.get('description', ''),  # Ensure you provide a default description if not found
-            tender_info['closing_date'],
-            tender_info['source_url'],
-            tender_info['status'],
-            tender_info['scraped_at'],
-            tender_info['format'],
-            tender_info['tender_type']
-        )
+    # Prepare parameters for insertion
+    params = (
+        tender_info['title'],
+        tender_info.get('description', ''),  # Ensure you provide a default description if not found
+        tender_info['closing_date'],
+        tender_info['source_url'],
+        tender_info['status'],
+        tender_info['scraped_at'],
+        tender_info['format'],
+        tender_info['tender_type']
+    )
 
-        try:
-            # Execute the insertion/updating query and commit
-            cur.execute(insert_sql, params)
-            conn.commit()
-            logging.info(f"Successfully inserted/updated tender: {tender_info['title']}")
-            return True  # Indicate success
-        except Exception as e:
-            conn.rollback()
-            logging.error("Error inserting/updating tender: %s", str(e))
-            return False  # Indicate failure
-        finally:
-            cur.close()
+    try:
+        # Execute the insertion/updating query and commit
+        cur.execute(insert_sql, params)
+        db_connection.commit()
+        logging.info(f"Successfully inserted/updated tender: {tender_info['title']}")
+        return True  # Indicate success
+    except Exception as e:
+        db_connection.rollback()
+        logging.error("Error inserting/updating tender: %s", str(e))
+        return False  # Indicate failure
+    finally:
+        cur.close()  # Close the cursor only, not the connection
+
 
 
 def get_keywords_and_terms(db_connection):

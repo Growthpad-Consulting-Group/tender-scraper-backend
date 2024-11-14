@@ -4,6 +4,15 @@ from datetime import datetime
 from config import get_db_connection
 from utils import insert_tender_to_db
 
+def get_format(url):
+    """Determine the document format based on the URL."""
+    if url:
+        if url.lower().endswith('.pdf'):
+            return 'PDF'
+        elif url.lower().endswith('.docx'):
+            return 'DOCX'
+    return 'HTML'  # Default to HTML if no specific format is found
+
 def scrape_treasury_ke_tenders():
     """Scrapes tenders from the Kenya Treasury website and inserts them into the database."""
     url = "https://www.treasury.go.ke/tenders/"
@@ -20,8 +29,11 @@ def scrape_treasury_ke_tenders():
 
         # Find the table
         table = soup.find('table', {'id': 'tablepress-3'})
-        rows = table.find_all('tr')[1:]  # Skip the header row
+        if not table:
+            print("The expected tender table was not found.")
+            return
 
+        rows = table.find_all('tr')[1:]  # Skip the header row
         print(f"Found {len(rows)} rows in the tender table.")
 
         # Create the database connection
@@ -51,7 +63,10 @@ def scrape_treasury_ke_tenders():
                 if deadline_date.year != current_year:
                     continue
 
-                status = "Open" if deadline_date > datetime.now().date() else "Closed"
+                status = "open" if deadline_date > datetime.now().date() else "closed"
+
+                # Determine the format based on the document URL
+                format_type = get_format(document_url)
 
                 tender_data = {
                     'title': title,
@@ -59,8 +74,9 @@ def scrape_treasury_ke_tenders():
                     'closing_date': deadline_date,
                     'source_url': document_url,
                     'status': status,
-                    'format': "HTML",
-                    'scraped_at': datetime.now().date()
+                    'format': format_type,  # Set format based on URL
+                    'scraped_at': datetime.now().date(),
+                    'tender_type': "Kenya Treasury"  # Specifying the tender type
                 }
 
                 try:
@@ -70,7 +86,9 @@ def scrape_treasury_ke_tenders():
                           f"Reference Number: {reference_number}\n"
                           f"Closing Date: {deadline_date}\n"
                           f"Status: {status}\n"
-                          f"Format: HTML\n")
+                          f"Source URL: {document_url}\n"  # Include the URL in logs
+                          f"Format: {format_type}\n"  # Display the determined format
+                          f"Tender Type: Kenya Treasury\n")
                     print("=" * 40)  # Separator for readability
                 except Exception as e:
                     print(f"Error inserting tender '{title}' into database: {e}")
