@@ -33,9 +33,9 @@ socketio = SocketIO(app, cors_allowed_origins='*')
 def run_scraping_with_progress(tender_types):
     scraping_functions = {
         'CA Tenders': scrape_ca_tenders,
-        'ReliefWeb Tenders': fetch_reliefweb_tenders,
-        'Job in Rwanda Tenders': scrape_jobinrwanda_tenders,
-        'Treasury KE Tenders': scrape_treasury_ke_tenders,
+        'ReliefWeb Jobs': fetch_reliefweb_tenders,
+        'Job in Rwanda': scrape_jobinrwanda_tenders,
+        'Kenya Treasury': scrape_treasury_ke_tenders,
         'UNDP': scrape_undp_tenders,
         'Website Tenders': scrape_tenders_from_websites,
         'General Tenders': scrape_tenders,
@@ -226,52 +226,49 @@ def get_tenders():
     cur = conn.cursor()
 
     try:
+        # Handle POST request
         if request.method == 'POST':
             data = request.get_json()
             tender_types = data.get('tenderTypes', [])
             logging.info(f"Tender Types Querying: {tender_types}")
 
-            # Ensure to process the tender type correctly
             if not tender_types:
-                # If no tender types are provided, default to 'UNDP'
                 tender_types = ['UNDP']
 
-            # Include tender_type in the SELECT statement
             query = "SELECT title, description, closing_date, status, source_url, format, tender_type FROM tenders"
             query_params = []
 
-            # Prepare the PostgreSQL array format
             if tender_types:
                 query += " WHERE tender_type = ANY(%s);"
-                # Create a string that simulates a PostgreSQL array
                 query_params = (f'{{{" , ".join(tender_types)}}}',)
                 logging.info(f"Querying with tender types: {query_params}")
 
             logging.info(f"Executing query: {query} with params: {query_params}")
-
-            # Execute query with query_params
             cur.execute(query, query_params)
             tenders = cur.fetchall()
+            logging.info(f"Tenders fetched from DB (POST): {tenders}")
 
-            # logging.info(f"Tenders fetched from DB: {tenders}")  # Log fetched tenders
-
+        # Handle GET request
         elif request.method == 'GET':
+            logging.info("Fetching tenders with possible date filtering.")
             start_date = request.args.get('startDate')
             end_date = request.args.get('endDate')
 
-            # Include tender_type in the SELECT statement
-            query = "SELECT title, description, closing_date, status, source_url, format, tender_type FROM tenders WHERE TRUE"
+            query = "SELECT title, description, closing_date, status, source_url, format, tender_type FROM tenders"
             query_params = []
 
             if start_date and end_date:
-                query += " AND closing_date BETWEEN %s AND %s"
+                query += " WHERE closing_date BETWEEN %s AND %s"
                 query_params = (start_date, end_date)
+                logging.info(f"Filtering tenders by Date Range: {start_date} to {end_date}")
 
             logging.info(f"Executing query: {query} with params: {query_params}")
             cur.execute(query, query_params)
             tenders = cur.fetchall()
 
-            logging.info(f"Tenders fetched from DB (GET): {tenders}")  # Log fetched tenders
+            # Log total records found
+            total_records = len(tenders)
+            logging.info(f"Total records found in tenders table: {total_records}")
 
         # Transform fetched tenders into a list of dictionaries
         tenders_list = [{
@@ -281,7 +278,7 @@ def get_tenders():
             "status": tender[3].capitalize(),
             "source_url": tender[4],
             "format": tender[5],
-            "tender_type": tender[6]  # Add the tender type here
+            "tender_type": tender[6]
         } for tender in tenders]
 
         open_tenders = [tender for tender in tenders_list if tender["status"].lower() == "open"]
@@ -293,6 +290,7 @@ def get_tenders():
         return jsonify({
             "open_tenders": open_tenders,
             "closed_tenders": closed_tenders,
+            "total_tenders": total_records,
             "month_names": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
         }), 200
 
