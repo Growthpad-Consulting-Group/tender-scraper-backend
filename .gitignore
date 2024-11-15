@@ -41,9 +41,6 @@ dist/
 Thumbs.db
 ehthumbs.db
 
-# Secret files (added for clarity)
-config.py
-
 # Package manager files (e.g., for poetry or pipenv)
 Pipfile.lock
 poetry.lock
