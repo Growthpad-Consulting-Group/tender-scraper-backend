@@ -17,3 +17,4 @@ beautifulsoup4~=4.12.3
 pandas~=2.0.3
 pg8000~=1.31.2
 gunicorn==23.0.0
+Flask-SocketIO==5.3.2  # or the latest stable version
