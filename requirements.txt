@@ -19,3 +19,4 @@ pg8000~=1.31.2
 gunicorn==23.0.0
 Flask-SocketIO==5.3.2
 python-dotenv
+Flask-JWT-Extended==4.5.4
