@@ -1,4 +1,8 @@
 from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+
+load_dotenv()  # This will load your .env variables into the environment
+from redis_cache import set_cache, get_cache, delete_cache
 from flask_socketio import SocketIO
 import bcrypt
 from config import get_db_connection
@@ -30,6 +34,10 @@ CORS(app, supports_credentials=True)  # Allow credentials for your requests
 # Initialize SocketIO
 socketio = SocketIO(app, cors_allowed_origins='*')
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
 def run_scraping_with_progress(tender_types):
     scraping_functions = {
         'CA Tenders': scrape_ca_tenders,
@@ -59,14 +67,14 @@ def run_scraping_with_progress(tender_types):
     socketio.emit('scan-complete')  # Notify the client that the scan is complete
 
 
-
-
 # JWT setup
-app.config['JWT_SECRET_KEY'] = 'your_secret_key'  # Change this to a strong secret key
+app.config[
+    'JWT_SECRET_KEY'] = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind2YnJ3aG52dmNwbWxidXVndW1tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjgxMTQ5NDIsImV4cCI6MjA0MzY5MDk0Mn0.s4s_w2TxvRgK1SQPXdBlGAblD0vx-06fcf5IeArThqs'  # Change this to a strong secret key
 jwt = JWTManager(app)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
+
 
 # User login route
 @app.route('/login', methods=['POST'])
@@ -99,6 +107,7 @@ def login():
     else:
         return jsonify({"msg": "Invalid username or password"}), 401
 
+
 # Protected route for dashboard
 @app.route('/dashboard', methods=['GET'])
 @jwt_required()
@@ -106,9 +115,10 @@ def dashboard():
     current_user = get_jwt_identity()
     return jsonify(logged_in_as=current_user), 200
 
+
 # Function to run all scraping tasks
 def run_all_scraping():
-    print("Running all scraping tasks at:", datetime.now())
+    logging.info("Running all scraping tasks at: %s", datetime.now())
 
     scraping_functions = [
         scrape_ca_tenders,
@@ -122,10 +132,12 @@ def run_all_scraping():
 
     for scrape_func in scraping_functions:
         try:
+            logging.info("Starting scrape for: %s", scrape_func.__name__)
             scrape_func()
-            print(f"{scrape_func.__name__} completed successfully.")
+            logging.info("%s completed successfully.", scrape_func.__name__)
         except Exception as e:
-            print(f"Error in {scrape_func.__name__}: {str(e)}")
+            logging.error("Error in %s: %s", scrape_func.__name__, str(e))
+
 
 # Initialize APScheduler
 scheduler = BackgroundScheduler()
@@ -134,7 +146,8 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(func=run_all_scraping, trigger="interval", hours=24)
 scheduler.start()
 
-#Quick Scan
+
+# Quick Scan
 @app.route('/api/run-scan', methods=['POST'])
 @jwt_required()
 def run_scan():
@@ -154,7 +167,8 @@ def run_scan():
     except Exception as e:
         logging.error(f"Error starting scrape: {e}")
         return jsonify({"msg": "Error starting scrape."}), 500
-    
+
+
 # Route to get all scraping tasks
 @app.route('/api/scraping-tasks', methods=['GET'])
 @jwt_required()
@@ -199,23 +213,33 @@ def get_scraping_tasks():
         logging.error(f"Error fetching tasks: {str(e)}")
         return jsonify({"msg": "Error fetching tasks."}), 500
 
+
 # Task ID Along with User ID
 def generate_job_id(user_id, task_id):
     return f"user_{user_id}_task_{task_id}"
+
 
 def schedule_task_scrape(user_id, task_id, job_function, trigger, **trigger_args):
     job_id = generate_job_id(user_id, task_id)
 
     existing_job = scheduler.get_job(job_id)
     if existing_job:
-        print(f"Removing existing job {job_id} before rescheduling.")
+        logging.info(f"Removing existing job {job_id} before rescheduling.")
         scheduler.remove_job(job_id)
 
     try:
         scheduler.add_job(job_function, trigger, id=job_id, **trigger_args)
-        print(f'Scheduled job: {job_id}')
+        logging.info('Scheduled job: %s', job_id)
     except Exception as e:
-        print(f"Error scheduling job {job_id}: {e}")
+        logging.error("Error scheduling job %s: %s", job_id, str(e))
+
+
+# Function to log job events
+def job_listener(event):
+    if event.exception:
+        logging.error('Job %s failed: %s', event.job_id, event.exception)
+    else:
+        logging.info('Job %s completed successfully.', event.job_id)
 
 
 # Unified tender fetching route
@@ -232,29 +256,45 @@ def get_tenders():
             tender_types = data.get('tenderTypes', [])
             logging.info(f"Tender Types Querying: {tender_types}")
 
-            if not tender_types:
-                tender_types = ['UNDP']
+            # Existing logic...
 
-            query = "SELECT title, description, closing_date, status, source_url, format, tender_type FROM tenders"
-            query_params = []
-
-            if tender_types:
-                query += " WHERE tender_type = ANY(%s);"
-                query_params = (f'{{{" , ".join(tender_types)}}}',)
-                logging.info(f"Querying with tender types: {query_params}")
-
-            logging.info(f"Executing query: {query} with params: {query_params}")
-            cur.execute(query, query_params)
-            tenders = cur.fetchall()
-            logging.info(f"Tenders fetched from DB (POST): {tenders}")
-
-        # Handle GET request
         elif request.method == 'GET':
-            logging.info("Fetching tenders with possible date filtering.")
+            # Check if we're fetching tender counts for "Uploaded Websites"
+            if request.args.get('type') == 'uploaded':
+                logging.info("Fetching tender counts for 'Uploaded Websites'")
+
+                # Check the cache first
+                cached_result = get_cache('tender_counts_uploaded')
+                if cached_result:
+                    return jsonify(cached_result), 200  # Return cached response
+
+                # Proceed to query the database
+                cur.execute("""
+                    SELECT COUNT(*) FROM tenders WHERE tender_type = 'Uploaded Websites' AND status = 'open'
+                """)
+                open_count = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT COUNT(*) FROM tenders WHERE tender_type = 'Uploaded Websites' AND status = 'closed'
+                """)
+                closed_count = cur.fetchone()[0]
+
+                result = {
+                    "open_tenders": open_count,
+                    "closed_tenders": closed_count
+                }
+
+                # Cache the result
+                set_cache('tender_counts_uploaded', result)
+
+                return jsonify(result), 200
+
+            # Proceed to fetch all tenders with possible date filtering
+            logging.info("Fetching all tenders with possible date filtering.")
             start_date = request.args.get('startDate')
             end_date = request.args.get('endDate')
 
-            query = "SELECT title, description, closing_date, status, source_url, format, tender_type FROM tenders"
+            query = "SELECT title, description, closing_date, status, source_url, format, tender_type, scraped_at FROM tenders"
             query_params = []
 
             if start_date and end_date:
@@ -278,7 +318,8 @@ def get_tenders():
             "status": tender[3].capitalize(),
             "source_url": tender[4],
             "format": tender[5],
-            "tender_type": tender[6]
+            "tender_type": tender[6],
+            "scraped_at": tender[7]
         } for tender in tenders]
 
         open_tenders = [tender for tender in tenders_list if tender["status"].lower() == "open"]
@@ -291,7 +332,8 @@ def get_tenders():
             "open_tenders": open_tenders,
             "closed_tenders": closed_tenders,
             "total_tenders": total_records,
-            "month_names": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+            "month_names": ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                            "October", "November", "December"]
         }), 200
 
     except Exception as e:
@@ -300,18 +342,20 @@ def get_tenders():
     finally:
         cur.close()
         conn.close()
-        
+
+
 # Function to log task events
 def log_task_event(task_id, user_id, log_message):
     conn = get_db_connection()
     cur = conn.cursor()
     created_at = datetime.now().isoformat()  # Use ISO format/UTC for consistency
     cur.execute("INSERT INTO task_logs (task_id, user_id, log_entry, created_at) VALUES (%s, %s, %s, %s)",
-            (task_id, user_id, log_message, created_at))
+                (task_id, user_id, log_message, created_at))
     conn.commit()
 
-
     # Route to clear logs
+
+
 @app.route('/api/clear-logs/<int:task_id>', methods=['DELETE'])
 @jwt_required()
 def clear_logs(task_id):
@@ -380,7 +424,8 @@ def add_task():
         INSERT INTO scheduled_tasks (user_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING task_id;
-    """, (current_user, name, frequency, start_time, end_time, priority, False, tender_type))  # Include tender_type here
+    """, (
+    current_user, name, frequency, start_time, end_time, priority, False, tender_type))  # Include tender_type here
 
     task_id = cur.fetchone()[0]  # Automatically generated task_id
     conn.commit()
@@ -388,6 +433,7 @@ def add_task():
     log_task_event(task_id, current_user, f'Task "{name}" added successfully.')
 
     return jsonify({"msg": "Task added successfully.", "task_id": task_id}), 201
+
 
 # Route to fetch logs
 @app.route('/api/task-logs/<int:task_id>', methods=['GET'])
@@ -398,7 +444,8 @@ def get_task_logs(task_id):
     conn = get_db_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT log_entry, created_at FROM task_logs WHERE task_id = %s AND user_id = %s", (task_id, current_user))
+    cur.execute("SELECT log_entry, created_at FROM task_logs WHERE task_id = %s AND user_id = %s",
+                (task_id, current_user))
     logs = cur.fetchall()
 
     if not logs:
@@ -448,6 +495,7 @@ def get_all_task_logs():
         cur.close()
         conn.close()
 
+
 # Route to cancel a scheduled task
 @app.route('/api/cancel-task/<int:task_id>', methods=['DELETE'])
 @jwt_required()
@@ -477,12 +525,13 @@ def cancel_task(task_id):
         except Exception as e:
             return jsonify({"msg": f"Failed to remove job {job_id}: {str(e)}"}), 500
     else:
-        print(f"Job {job_id} not found in scheduler.")
+        logging.warning(f"Job {job_id} not found in scheduler.")
 
     cur.execute("DELETE FROM scheduled_tasks WHERE task_id = %s", (task_id,))
     conn.commit()
 
     return jsonify({"msg": "Task canceled successfully."}), 200
+
 
 # Route to toggle task status (Enable/Disable)
 @app.route('/api/toggle-task-status/<int:task_id>', methods=['PATCH'])
@@ -508,6 +557,7 @@ def toggle_task_status(task_id):
     log_task_event(task_id, current_user, f'Task "{task_id}" has been {status_message} successfully.')
 
     return jsonify({"msg": f"Task {task_id} {status_message} successfully."}), 200
+
 
 # Route to edit a scheduled task
 @app.route('/api/edit-task/<int:task_id>', methods=['PUT'])
@@ -543,7 +593,9 @@ def edit_task(task_id):
 
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT user_id, name, frequency, start_time, end_time, priority, tender_type FROM scheduled_tasks WHERE task_id = %s", (task_id,))
+    cur.execute(
+        "SELECT user_id, name, frequency, start_time, end_time, priority, tender_type FROM scheduled_tasks WHERE task_id = %s",
+        (task_id,))
     task = cur.fetchone()
 
     if task is None:
@@ -578,6 +630,7 @@ def edit_task(task_id):
     log_task_event(task_id, current_user, log_message)
 
     return jsonify({"msg": "Task edited successfully."}), 200
+
 
 atexit.register(lambda: scheduler.shutdown())
 
