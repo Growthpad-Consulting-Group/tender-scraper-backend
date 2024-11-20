@@ -1,8 +1,8 @@
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-from config import get_db_connection  # Import the function to get a database connection
-from utils import insert_tender_to_db  # Import the utility function for database insertion
+from app.config import get_db_connection  # Import the function to get a database connection
+from app.routes.tenders.tender_utils import insert_tender_to_db  # Import the utility function for database insertion
 
 def get_format(url):
     """Determine the document format based on the URL."""

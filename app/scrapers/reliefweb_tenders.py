@@ -1,7 +1,8 @@
 import requests
 from datetime import datetime
-from config import get_db_connection
-from utils import insert_tender_to_db
+from app.config import get_db_connection
+from app.routes.tenders.tender_utils import insert_tender_to_db
+
 
 def get_format(url):
     """Determine the document format based on the URL."""
@@ -10,6 +11,7 @@ def get_format(url):
     elif url.lower().endswith('.docx'):
         return 'DOCX'
     return 'HTML'  # Default to HTML if no specific format is found
+
 
 def fetch_reliefweb_tenders():
     """Fetches tenders from the ReliefWeb API and inserts them into the database."""
@@ -78,6 +80,7 @@ def fetch_reliefweb_tenders():
     except Exception as e:
         print(f"An error occurred while fetching tenders: {e}")
         return []
+
 
 if __name__ == "__main__":
     fetch_reliefweb_tenders()

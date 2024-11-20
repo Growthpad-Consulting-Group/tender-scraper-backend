@@ -1,9 +1,10 @@
 from flask import Blueprint, request, jsonify
+from app.cache.redis_cache import set_cache, get_cache
 import pandas as pd
 from flask_jwt_extended import jwt_required
 import logging
 import pg8000
-from config import get_db_connection
+from app.config import get_db_connection
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -114,7 +115,7 @@ def upload_file():
 
 # POST method to manually add a website
 @upload_bp.route('/api/websites', methods=['POST'])
-@jwt_required()  # Ensure the user is authenticated
+@jwt_required()
 def add_website():
     data = request.get_json()
 
@@ -122,11 +123,9 @@ def add_website():
     if not data.get('name') or not data.get('url'):
         return jsonify({"msg": "Missing required fields: name and url are required."}), 400
 
-    # If location is provided, use it; otherwise, set it to None (optional field)
-    location = data.get('location')  # This can be None if not provided
+    location = data.get('location')  # Optional field
 
     try:
-        # Insert website data into the database
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(""" 
@@ -135,10 +134,13 @@ def add_website():
                     RETURNING id, name, url, location  -- Return the newly added website data
                 """, (data['name'], data['url'], location))
 
-                # Fetch the newly added website data
                 new_website = cur.fetchone()
 
             conn.commit()
+
+        # Invalidate the relevant cache
+        delete_cache('total_websites_count')  # Clear cached total
+        # You may also want to delete all relevant cached pages if needed
 
         return jsonify({
             "msg": "Website added successfully",
@@ -157,32 +159,48 @@ def add_website():
 
 # GET method to retrieve data from the database with pagination
 @upload_bp.route('/api/websites', methods=['GET'])
-@jwt_required()  # Ensure the user is authenticated
+@jwt_required()
 def get_websites():
     try:
-        # Pagination parameters
-        page = int(request.args.get('page', 1))  # Default page is 1
-        per_page = int(request.args.get('per_page', 50))  # Default per_page is 50
+        tender_type_filter = request.args.get('tender_type', 'Uploaded Websites')  # Default to 'Uploaded Websites'
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
         offset = (page - 1) * per_page
 
+        # Check cache first
+        cache_key = f'websites_page_{page}_perpage_{per_page}_tendertype_{tender_type_filter}'
+        cached_result = get_cache(cache_key)
+        if cached_result:
+            return jsonify(cached_result), 200  # Return cached response
+
+        # If not cached, proceed to query the database
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Fetch websites with pagination
-                cur.execute(
-                    "SELECT id, name, url, location FROM websites LIMIT %s OFFSET %s",
-                    (per_page, offset)
-                )
+                # Fetch total count of websites with the specified tender_type
+                cur.execute("SELECT COUNT(*) FROM websites WHERE tender_type = %s", (tender_type_filter,))
+                total_count = cur.fetchone()[0]
+
+                # Fetch websites with pagination and the specified tender_type
+                cur.execute("SELECT id, name, url, location FROM websites WHERE tender_type = %s LIMIT %s OFFSET %s", (tender_type_filter, per_page, offset))
                 websites = cur.fetchall()
 
-        # Return the data in JSON format
         website_list = [{"id": website[0], "name": website[1], "url": website[2], "location": website[3]} for website in websites]
-        return jsonify({"websites": website_list, "page": page, "per_page": per_page}), 200
+        response = {
+            "websites": website_list,
+            "total_websites": total_count,
+            "page": page,
+            "per_page": per_page
+        }
+
+        # Cache the result
+        set_cache(cache_key, response)
+
+        return jsonify(response), 200
 
     except Exception as e:
         logging.error(f"Error retrieving websites: {e}")
         return jsonify({"msg": "Error retrieving websites", "error": str(e)}), 500
-
-
+    
 # PUT method to update website details by ID
 @upload_bp.route('/api/websites/<int:id>', methods=['PUT'])
 @jwt_required()  # Ensure the user is authenticated
@@ -250,14 +268,22 @@ def bulk_delete_websites():
 
 # Optional: Count total websites
 @upload_bp.route('/api/websites/count', methods=['GET'])
-@jwt_required()  # Ensure the user is authenticated
+@jwt_required()
 def count_websites():
     try:
+        # Check cache first
+        cached_count = get_cache('total_websites_count')
+        if cached_count:
+            return jsonify({"total_websites": cached_count}), 200  # Return cached response
+
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 # Count the total number of websites
                 cur.execute("SELECT COUNT(*) FROM websites")
                 count = cur.fetchone()[0]
+
+        # Cache the result
+        set_cache('total_websites_count', count)
 
         return jsonify({"total_websites": count}), 200
     except Exception as e:

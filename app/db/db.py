@@ -1,6 +1,6 @@
 import pg8000
 from contextlib import closing
-from config import get_db_connection
+from app.config import get_db_connection
 from datetime import datetime  # Import datetime to avoid the error
 import logging
 

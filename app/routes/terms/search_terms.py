@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from config import get_db_connection
+from app.config import get_db_connection
 from flask_jwt_extended import jwt_required
 
 search_terms_bp = Blueprint('search_terms_bp', __name__)

@@ -1,5 +1,5 @@
-from config import get_db_connection
-from scraper import scrape_tenders
+from app.config import get_db_connection
+from app.scrapers.scraper import scrape_tenders
 from datetime import datetime
 import logging
 

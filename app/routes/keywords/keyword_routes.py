@@ -1,6 +1,6 @@
 # keyword_routes.py
 from flask import Blueprint, request, jsonify
-from config import get_db_connection
+from app.config import get_db_connection
 
 keyword_bp = Blueprint('keyword_bp', __name__)
 

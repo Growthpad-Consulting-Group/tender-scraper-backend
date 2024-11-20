@@ -1,10 +1,10 @@
-from config import get_db_connection
+from app.config import get_db_connection
 import logging
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-from db import insert_tender_to_db, get_keywords_and_terms
-from utils import (
+from app.db import insert_tender_to_db, get_keywords_and_terms
+from app.routes.tenders.tender_utils import (
     extract_closing_dates,
     parse_closing_date,
     get_format,
@@ -90,7 +90,7 @@ def scrape_tenders(db_connection, query, search_engines):
 
 def extract_actual_link_from_search_result(href, engine):
     """Extracts the actual tender link from the search engine result."""
-    if engine in ['Google', 'Bing', 'Yahoo']:  # Logic for extracting from common search engines
+    if engine in ['Google', 'Bing', 'Yahoo', 'DuckDuckGo', 'Ask']:  # Logic for extracting from common search engines
         match = re.search(r'q=(.+?)(&|$)', href)
         if match:
             return match.group(1)  # Actual URL
