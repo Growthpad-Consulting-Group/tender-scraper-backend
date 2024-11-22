@@ -1,15 +1,23 @@
 import re
+import time
 from datetime import datetime
-import requests
 from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from app.config import get_db_connection
 from app.routes.tenders.tender_utils import insert_tender_to_db
 from app.db.db import get_directory_keywords
 import logging
 
-# Configure logging
+# Configure Python logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
+# Suppress Selenium DEBUG logs
+logging.getLogger('selenium').setLevel(logging.WARNING)
+logging.getLogger('selenium.webdriver').setLevel(logging.WARNING)
 
 def get_format(url):
     """Determine the document format based on the URL."""
@@ -19,126 +27,247 @@ def get_format(url):
         return 'DOCX'
     return 'HTML'  # Default to HTML if no specific format is found
 
+def extract_deadline_date(tender):
+    """Extract the deadline date from the tender element."""
+    try:
+        deadline_cell = tender.find('div', class_='tableCell resultInfo1 deadline')
+        if not deadline_cell:
+            logging.info("No deadline cell found.")
+            return None
+
+        deadline_str = deadline_cell.get_text(strip=True)
+        match = re.search(r'(\d{1,2}-\w{3}-\d{4})', deadline_str)
+        if match:
+            cleaned_date = match.group(1)
+            return datetime.strptime(cleaned_date, "%d-%b-%Y").date()
+        else:
+            raise ValueError("Deadline date not found in the extracted string.")
+
+    except Exception as e:
+        logging.error(f"Error extracting deadline date: {e}")
+        return None
+
 def ensure_db_connection():
     """Check and ensure the database connection is valid."""
     try:
         db_connection = get_db_connection()
         if db_connection is None:
-            logger.warning("Database connection is None. Reconnecting...")
+            logging.error("Database connection is None. Reconnecting...")
             return None
 
-        # Test the connection by executing a simple query
         cursor = db_connection.cursor()
-        cursor.execute("SELECT 1")  # Simple query to test connection
+        cursor.execute("SELECT 1")
         cursor.close()
         return db_connection
     except Exception as e:
-        logger.error(f"Error establishing or testing database connection: {str(e)}")
+        logging.error(f"Error establishing or testing database connection: {str(e)}")
         return None
 
+def setup_selenium_driver():
+    """Setup Chrome WebDriver with optimized settings for better performance."""
+    try:
+        options = webdriver.ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--ignore-certificate-errors')
+        options.add_argument('--window-size=1920,1080')
+
+        logging.info("Initializing Chrome WebDriver...")
+        driver = webdriver.Chrome(options=options)
+
+        driver.set_page_load_timeout(60)
+        driver.implicitly_wait(20)
+
+        logging.info("Chrome WebDriver setup completed successfully")
+        return driver
+    except Exception as e:
+        logging.error(f"Failed to setup Chrome WebDriver: {str(e)}")
+        raise
+
+def load_page_with_retry(driver, url, max_retries=3):
+    """Load page with retry mechanism."""
+    for attempt in range(max_retries):
+        try:
+            driver.delete_all_cookies()
+            driver.get(url)
+
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+            logging.info("Successfully visited the URL.")
+            return True
+
+        except TimeoutException:
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                continue
+            else:
+                raise
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                continue
+            else:
+                raise
+
+def select_beneficiary_country(driver):
+    """Select Kenya from the Beneficiary country or territory dropdown."""
+    try:
+        search_input = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.ID, "selNoticeCountry-input"))
+        )
+        search_input.clear()
+        search_input.send_keys("Kenya")
+
+        time.sleep(2)
+
+        kenya_option = WebDriverWait(driver, 30).until(
+            EC.element_to_be_clickable((By.XPATH, "//li[contains(text(), 'Kenya')]"))
+        )
+
+        kenya_option.click()
+
+        selected_country = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "selNoticeCountry"))
+        )
+        selected_value = selected_country.get_attribute('value')
+
+        if selected_value == "2397":  # Assuming '2397' is the value for Kenya
+            logging.info("Kenya successfully selected from the Beneficiary country or territory dropdown.")
+            return True
+        else:
+            logging.error(f"Expected 'Kenya' to be selected, but got value: {selected_value}.")
+            return False
+    except NoSuchElementException as e:
+        logging.error(f"Element not found during the selection process: {str(e)}")
+        return False
+    except Exception as e:
+        logging.error(f"Failed to select Kenya from the dropdown: {str(e)}")
+        return False
+
 def scrape_ungm_tenders():
-    """Scrapes tenders from the UNGM procurement notices page and inserts them into the database."""
-    url = "https://ungm.org/Public/Notice/"
+    """Scrapes tenders from UNGM."""
+    url = "https://www.ungm.org/Public/Notice"
+    driver = None
+    db_connection = None
 
     try:
-        # Ensure a valid database connection
         db_connection = ensure_db_connection()
         if not db_connection:
-            logger.error("Failed to establish a database connection.")
+            logging.error("Failed to establish a database connection.")
             return
 
-        # Fetch keywords related to UNGM from the database
-        keywords = get_directory_keywords(db_connection, "UNGM")
+        keywords = get_directory_keywords(db_connection, 'UNGM')
         if not keywords:
-            logger.warning("No keywords found for 'UNGM'. Aborting scrape.")
+            logging.error("No keywords found for 'UNGM'. Aborting scrape.")
             return
         keywords = [keyword.lower() for keyword in keywords]
 
-        response = requests.get(url)
-        if response.status_code != 200:
-            logger.error(f"Failed to retrieve UNGM page, status code: {response.status_code}")
-            return
+        driver = setup_selenium_driver()
 
-        logger.info("Successfully retrieved UNGM page.")
-        soup = BeautifulSoup(response.content, 'html.parser')
+        load_page_with_retry(driver, url)
+        time.sleep(5)
 
-        # Find all tender links
-        tenders = soup.find_all('a', class_='vacanciesTableLink')
-        logger.info(f"Found {len(tenders)} tenders.")
+        if select_beneficiary_country(driver):
+            time.sleep(5)
 
-        for tender in tenders:
-            title_label = tender.find('div', class_='vacanciesTable__cell__label', string=lambda x: x and 'Title' in x.strip())
-            title = title_label.find_next_sibling('span').text.strip() if title_label else "N/A"
+            total_results = WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.ID, "noticeSearchTotal"))
+            ).text
+            total_tenders = int(total_results)
+            logging.info(f"{total_tenders} tenders found after selecting Kenya.")
 
-            # Check if the title contains any of the keywords
-            if not any(keyword in title.lower() for keyword in keywords):
-                continue  # Skip if there are no matching keywords
+            scroll_pause_time = 2
+            last_height = driver.execute_script("return document.body.scrollHeight")
 
-            ref_no_label = tender.find('div', class_='vacanciesTable__cell__label', string=lambda x: x and 'Ref No' in x.strip())
-            reference_number = ref_no_label.find_next_sibling('span').text.strip() if ref_no_label else "N/A"
+            while True:
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(scroll_pause_time)
 
-            deadline_label = tender.find('div', class_='vacanciesTable__cell__label', string=lambda x: x and 'Deadline' in x.strip())
-            deadline_str = deadline_label.find_next_sibling('span').find('nobr').text.strip() if deadline_label and deadline_label.find_next_sibling('span').find('nobr') else "N/A"
+                new_height = driver.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
 
-            logger.info(f"Deadline string found for tender '{title}': {deadline_str}")
+            page_source = driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
 
-            try:
-                match = re.search(r'(\d{1,2}-\w{3}-\d{2})', deadline_str)
-                if match:
-                    cleaned_date = match.group(1)
-                    logger.info(f"Cleaned date part: '{cleaned_date}'")
-                    deadline_date = datetime.strptime(cleaned_date, "%d-%b-%y").date()
+            tenders = soup.find_all('div', class_='tableRow dataRow notice-table')
+            total_dynamic_tenders = len(tenders)
+            logging.info(f"Total tenders after dynamic load: {total_dynamic_tenders}")
+
+            found_for_keyword = 0
+
+            for tender in tenders:
+                title_elem = tender.find('div', class_='resultTitle')
+                title = title_elem.get_text(strip=True) if title_elem else ""
+
+                # Extracting the href for the specific tender link
+                tender_link = title_elem.find('a', href=True)
+                if tender_link and "href" in tender_link.attrs:
+                    href = tender_link['href']
+                    source_url = f"https://www.ungm.org{href}"  # Construct the full URL
                 else:
-                    raise ValueError("Date not found in the deadline string.")
-            except ValueError as e:
-                logger.error(f"Error parsing deadline date for tender '{title}': {e}")
-                continue
+                    logging.warning(f"No valid link found for tender titled: {title}")
+                    continue  # Skip if no valid link is present
 
-            status = "open" if deadline_date > datetime.now().date() else "closed"
-            negotiation_id = tender['href'].split('=')[-1]
-            source_url = f"https://www.ungm.org/Public/Notice/251984={negotiation_id}"
+                deadline_date = extract_deadline_date(tender)
+                if not deadline_date:
+                    continue
 
-            # Determine the document format
-            format_type = get_format(source_url)
+                status = "open" if deadline_date > datetime.now().date() else "closed"
+                format_type = get_format(source_url)
 
-            tender_data = {
-                'title': title,
-                'description': reference_number,
-                'closing_date': deadline_date,
-                'source_url': source_url,
-                'status': status,
-                'format': format_type,
-                'scraped_at': datetime.now().date(),
-                'tender_type': "UNGM"
-            }
+                tender_data = {
+                    'title': title,
+                    'description': title,
+                    'closing_date': deadline_date,
+                    'source_url': source_url,
+                    'status': status,
+                    'format': format_type,
+                    'scraped_at': datetime.now().date(),
+                    'tender_type': "UNGM",
+                }
 
-            # Ensure database connection is valid before insertion
-            db_connection = ensure_db_connection()
-            if not db_connection:
-                logger.error("Database connection dropped. Skipping insertion.")
-                continue  # Skip to the next tender if the connection failed
+                if any(keyword in title.lower() for keyword in keywords):
+                    found_for_keyword += 1
+                    try:
+                        # Attempt to execute an insert, reconnecting if there's an issue
+                        if db_connection is None:
+                            logging.warning("Database connection is None. Attempting to reconnect...")
+                            db_connection = ensure_db_connection()  # Reopen connection
 
-            try:
-                insert_tender_to_db(tender_data, db_connection)  # Insert into the database
-                logger.info(f"Tender inserted into database: {title}")
-                logger.info(f"Title: {title}\n"
-                            f"Reference Number: {reference_number}\n"
-                            f"Closing Date: {deadline_date}\n"
-                            f"Status: {status}\n"
-                            f"Source URL: {source_url}\n"
-                            f"Format: {format_type}\n"
-                            f"Tender Type: UNGM\n")
-                logger.info("=" * 40)  # Separator for readability
-            except Exception as e:
-                logger.error(f"Error inserting tender '{title}' into database: {e}")
+                        insert_tender_to_db(tender_data, db_connection)
+                        logging.info(f"Inserted Kenya tender: {title} | Source URL: {source_url}")
 
-        logger.info("Scraping completed.")
+                    except Exception as e:
+                        logging.error(f"Error inserting tender '{title}' into database: {e}")
+                        # Attempt to reconnect & retry insert
+                        db_connection = ensure_db_connection()  # Attempt to re-establish connection
+                        if db_connection:
+                            try:
+                                insert_tender_to_db(tender_data, db_connection)  # Retry insert
+                                logging.info(f"Reinserted tender: {title} | Source URL: {source_url}")
+                            except Exception as retry_exception:
+                                logging.error(f"Error reinserting tender '{title}': {retry_exception}")
+
+            logging.info(f"{found_for_keyword} tenders found for the specified keywords.")
+            logging.info("Kenya tender scraping completed.")
 
     except Exception as e:
-        logger.error(f"An error occurred while scraping: {e}")
+        logging.error(f"Fatal error during scraping: {str(e)}")
     finally:
-        if db_connection:  # Ensure the connection is closed if it was opened
+        if driver:
+            driver.quit()
+        if db_connection:
             db_connection.close()
 
 if __name__ == "__main__":
-    scrape_ungm_tenders()
+    try:
+        scrape_ungm_tenders()
+    except Exception as e:
+        logging.error(f"Script failed with error: {str(e)}")
