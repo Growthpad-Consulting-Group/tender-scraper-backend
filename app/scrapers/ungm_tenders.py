@@ -114,46 +114,53 @@ def load_page_with_retry(driver, url, max_retries=3):
             else:
                 raise
 
-def select_beneficiary_country(driver):
-    """Select Kenya from the Beneficiary country or territory dropdown."""
+def select_beneficiary_country(driver, country):
+    """Select a beneficiary country or territory from the dropdown based on the provided country name."""
     try:
         search_input = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.ID, "selNoticeCountry-input"))
         )
         search_input.clear()
-        search_input.send_keys("Kenya")
+        search_input.send_keys(country)
 
-        time.sleep(2)
+        time.sleep(2)  # Wait for the dropdown to populate
 
-        kenya_option = WebDriverWait(driver, 30).until(
-            EC.element_to_be_clickable((By.XPATH, "//li[contains(text(), 'Kenya')]"))
+        country_option = WebDriverWait(driver, 30).until(
+            EC.element_to_be_clickable((By.XPATH, f"//li[contains(text(), '{country}')]"))
         )
 
-        kenya_option.click()
+        country_option.click()
 
         selected_country = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "selNoticeCountry"))
         )
         selected_value = selected_country.get_attribute('value')
 
-        if selected_value == "2397":  # Assuming '2397' is the value for Kenya
-            logging.info("Kenya successfully selected from the Beneficiary country or territory dropdown.")
-            return True
-        else:
-            logging.error(f"Expected 'Kenya' to be selected, but got value: {selected_value}.")
-            return False
+        logging.info(f"{country} successfully selected from the Beneficiary country or territory dropdown.")
+        return selected_value
     except NoSuchElementException as e:
-        logging.error(f"Element not found during the selection process: {str(e)}")
-        return False
+        logging.error(f"Element not found during the selection process for {country}: {str(e)}")
+        return None
     except Exception as e:
-        logging.error(f"Failed to select Kenya from the dropdown: {str(e)}")
-        return False
+        logging.error(f"Failed to select {country} from the dropdown: {str(e)}")
+        return None
 
 def scrape_ungm_tenders():
     """Scrapes tenders from UNGM."""
     url = "https://www.ungm.org/Public/Notice"
     driver = None
     db_connection = None
+    countries = {
+        "Kenya": "2397",
+        "South Africa": "2481",
+        "Uganda": "2503",
+        "Ghana": "2370",
+        "Nigeria": "2443",
+        "Togo": "2494",
+        "Ethiopia": "2358",
+        "Rwanda": "2462",
+        "Tanzania": "2507",
+    }
 
     try:
         db_connection = ensure_db_connection()
@@ -172,14 +179,19 @@ def scrape_ungm_tenders():
         load_page_with_retry(driver, url)
         time.sleep(5)
 
-        if select_beneficiary_country(driver):
+        for country, value in countries.items():
+            chosen_value = select_beneficiary_country(driver, country)
+            if chosen_value != value:
+                logging.error(f"Expected {country} to be selected, but got value: {chosen_value}.")
+                continue
+
             time.sleep(5)
 
             total_results = WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.ID, "noticeSearchTotal"))
             ).text
             total_tenders = int(total_results)
-            logging.info(f"{total_tenders} tenders found after selecting Kenya.")
+            logging.info(f"{total_tenders} tenders found after selecting {country}.")
 
             scroll_pause_time = 2
             last_height = driver.execute_script("return document.body.scrollHeight")
@@ -198,7 +210,7 @@ def scrape_ungm_tenders():
 
             tenders = soup.find_all('div', class_='tableRow dataRow notice-table')
             total_dynamic_tenders = len(tenders)
-            logging.info(f"Total tenders after dynamic load: {total_dynamic_tenders}")
+            logging.info(f"Total tenders after dynamic load for {country}: {total_dynamic_tenders}")
 
             found_for_keyword = 0
 
@@ -212,7 +224,7 @@ def scrape_ungm_tenders():
                     href = tender_link['href']
                     source_url = f"https://www.ungm.org{href}"  # Construct the full URL
                 else:
-                    logging.warning(f"No valid link found for tender titled: {title}")
+                    logging.warning(f"No valid link found for tender titled: {title} ({country})")
                     continue  # Skip if no valid link is present
 
                 deadline_date = extract_deadline_date(tender)
@@ -242,21 +254,21 @@ def scrape_ungm_tenders():
                             db_connection = ensure_db_connection()  # Reopen connection
 
                         insert_tender_to_db(tender_data, db_connection)
-                        logging.info(f"Inserted Kenya tender: {title} | Source URL: {source_url}")
+                        logging.info(f"Inserted tender from {country}: {title} | Source URL: {source_url}")
 
                     except Exception as e:
-                        logging.error(f"Error inserting tender '{title}' into database: {e}")
+                        logging.error(f"Error inserting tender '{title}' from {country} into database: {e}")
                         # Attempt to reconnect & retry insert
                         db_connection = ensure_db_connection()  # Attempt to re-establish connection
                         if db_connection:
                             try:
                                 insert_tender_to_db(tender_data, db_connection)  # Retry insert
-                                logging.info(f"Reinserted tender: {title} | Source URL: {source_url}")
+                                logging.info(f"Reinserted tender from {country}: {title} | Source URL: {source_url}")
                             except Exception as retry_exception:
-                                logging.error(f"Error reinserting tender '{title}': {retry_exception}")
+                                logging.error(f"Error reinserting tender '{title}' from {country}: {retry_exception}")
 
-            logging.info(f"{found_for_keyword} tenders found for the specified keywords.")
-            logging.info("Kenya tender scraping completed.")
+            logging.info(f"{found_for_keyword} tenders found for the specified keywords from {country}.")
+            logging.info(f"{country} tender scraping completed.")
 
     except Exception as e:
         logging.error(f"Fatal error during scraping: {str(e)}")
