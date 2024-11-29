@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from app.cache.redis_cache import set_cache, get_cache
+from app.cache.redis_cache import set_cache, get_cache, delete_cache  # Include delete_cache for cache invalidation
 import pandas as pd
 from flask_jwt_extended import jwt_required
 import logging
@@ -10,6 +10,9 @@ from app.config import get_db_connection
 logging.basicConfig(level=logging.INFO)
 
 upload_bp = Blueprint('upload_bp', __name__)
+
+# Constants for batch size
+BATCH_SIZE = 100
 
 # POST method to upload Excel data to the database
 @upload_bp.route('/api/upload', methods=['POST'])
@@ -39,14 +42,21 @@ def upload_file():
         df.columns = df.columns.str.strip()
 
         # Check if required columns exist
-        required_columns = ['Website Name', 'URL']  # Updated to 'URL'
+        required_columns = ['Website Name', 'URL']
         for col in required_columns:
             if col not in df.columns:
                 return jsonify({"msg": f"Missing required column: {col}"}), 400
 
+        # Add the 'tender_type' column with default value 'Uploaded Websites'
+        df['tender_type'] = 'Uploaded Websites'
+
         # Collect data for batch insertion
-        insert_data = [(website_name, url, location)
-                       for website_name, url, location in zip(df['Website Name'], df['URL'], df.get('Location', [None] * len(df)))]
+        insert_data = [
+            (website_name, url, location, tender_type)
+            for website_name, url, location, tender_type in zip(
+                df['Website Name'], df['URL'], df.get('Location', [None] * len(df)), df['tender_type']
+            )
+        ]
 
     except Exception as e:
         logging.error(f"Error reading the file: {e}")
@@ -60,42 +70,46 @@ def upload_file():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 duplicate_urls = []  # List to store all duplicate URLs
-                processed_count = 0  # Keep track of how many websites were processed
+                processed_count = 0  # Track processed websites
 
-                for website_name, url, location in insert_data:
-                    try:
-                        # Check if URL already exists
-                        cur.execute("SELECT id FROM websites WHERE url = %s", (url,))
-                        existing_website = cur.fetchone()
+                # Batch processing
+                for i in range(0, len(insert_data), BATCH_SIZE):
+                    batch = insert_data[i:i + BATCH_SIZE]
+                    for website_name, url, location, tender_type in batch:
+                        try:
+                            # Check if URL already exists
+                            cur.execute("SELECT id FROM websites WHERE url = %s", (url,))
+                            existing_website = cur.fetchone()
 
-                        if existing_website:
-                            if overwrite:
-                                # Overwrite the specific duplicate URL
-                                logging.info(f"Overwriting URL: {url}")
-                                cur.execute(""" 
-                                    UPDATE websites
-                                    SET name = %s, location = %s
-                                    WHERE url = %s
-                                """, (website_name, location, url))
-                                processed_count += 1
+                            if existing_website:
+                                if overwrite:
+                                    logging.info(f"Overwriting URL: {url}")
+                                    cur.execute("""
+                                        UPDATE websites
+                                        SET name = %s, location = %s, tender_type = %s
+                                        WHERE url = %s
+                                    """, (website_name, location, tender_type, url))
+                                    processed_count += 1
+                                else:
+                                    logging.warning(f"Duplicate URL found: {url}")
+                                    duplicate_urls.append(url)
                             else:
-                                # Collect duplicate URL without processing further
-                                logging.warning(f"Duplicate URL found: {url}")
-                                duplicate_urls.append(url)
-                        else:
-                            # Insert the new URL if no duplicate found
-                            cur.execute(
-                                "INSERT INTO websites (name, url, location) VALUES (%s, %s, %s)",
-                                (website_name, url, location)
-                            )
-                            processed_count += 1
+                                cur.execute(
+                                    "INSERT INTO websites (name, url, location, tender_type) VALUES (%s, %s, %s, %s)",
+                                    (website_name, url, location, tender_type)
+                                )
+                                processed_count += 1
 
-                    except pg8000.dbapi.DatabaseError as e:
-                        logging.error(f"Error inserting/updating website {url}: {e}")
-                        raise e
+                        except pg8000.dbapi.DatabaseError as e:
+                            logging.error(f"Error inserting/updating website {url}: {e}")
+                            raise e
 
-                # Commit the transaction
-                conn.commit()
+                    # Commit the batch
+                    conn.commit()
+
+                # Invalidate relevant cache after upload
+                delete_cache('total_websites_count')
+                delete_cache('websites_page_1_perpage_50_tendertype_Uploaded Websites')
 
                 # Return response with all duplicates
                 if duplicate_urls:
@@ -104,13 +118,11 @@ def upload_file():
                         "duplicate_urls": duplicate_urls
                     }), 409
                 else:
-                    # Success response if all URLs processed successfully
                     return jsonify({"msg": f"{processed_count} URLs processed successfully"}), 201
 
     except Exception as e:
         logging.error(f"Error inserting data into the database: {e}")
         return jsonify({"msg": "Error adding URLs", "error": str(e)}), 500
-
 
 
 # POST method to manually add a website
@@ -119,28 +131,29 @@ def upload_file():
 def add_website():
     data = request.get_json()
 
-    # Validate the required fields: name and url
+    # Validate required fields
     if not data.get('name') or not data.get('url'):
         return jsonify({"msg": "Missing required fields: name and url are required."}), 400
 
     location = data.get('location')  # Optional field
+    tender_type = 'Uploaded Websites'  # Set tender_type for manual addition
 
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(""" 
-                    INSERT INTO websites (name, url, location)
-                    VALUES (%s, %s, %s)
-                    RETURNING id, name, url, location  -- Return the newly added website data
-                """, (data['name'], data['url'], location))
+                    INSERT INTO websites (name, url, location, tender_type)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id, name, url, location
+                """, (data['name'], data['url'], location, tender_type))
 
                 new_website = cur.fetchone()
 
             conn.commit()
 
         # Invalidate the relevant cache
-        delete_cache('total_websites_count')  # Clear cached total
-        # You may also want to delete all relevant cached pages if needed
+        delete_cache('total_websites_count')
+        delete_cache('websites_page_1_perpage_50_tendertype_Uploaded Websites')
 
         return jsonify({
             "msg": "Website added successfully",
@@ -148,7 +161,8 @@ def add_website():
                 "id": new_website[0],
                 "name": new_website[1],
                 "url": new_website[2],
-                "location": new_website[3]
+                "location": new_website[3],
+                "tender_type": tender_type  # Include tender_type in the response
             }
         }), 201
 
@@ -162,9 +176,16 @@ def add_website():
 @jwt_required()
 def get_websites():
     try:
-        tender_type_filter = request.args.get('tender_type', 'Uploaded Websites')  # Default to 'Uploaded Websites'
+        tender_type_filter = request.args.get('tender_type', 'Uploaded Websites')
         page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 50))
+        per_page_str = request.args.get('per_page', '50')  # Get per_page as string
+
+        # Check if per_page is 'all' and set a specific max value
+        if per_page_str.lower() == 'all':
+            per_page = 1000  # Or whatever max number of records you can handle in one go
+        else:
+            per_page = int(per_page_str)  # Convert it to an integer
+
         offset = (page - 1) * per_page
 
         # Check cache first
@@ -181,7 +202,8 @@ def get_websites():
                 total_count = cur.fetchone()[0]
 
                 # Fetch websites with pagination and the specified tender_type
-                cur.execute("SELECT id, name, url, location FROM websites WHERE tender_type = %s LIMIT %s OFFSET %s", (tender_type_filter, per_page, offset))
+                cur.execute("SELECT id, name, url, location FROM websites WHERE tender_type = %s LIMIT %s OFFSET %s",
+                            (tender_type_filter, per_page, offset))
                 websites = cur.fetchall()
 
         website_list = [{"id": website[0], "name": website[1], "url": website[2], "location": website[3]} for website in websites]
@@ -200,7 +222,8 @@ def get_websites():
     except Exception as e:
         logging.error(f"Error retrieving websites: {e}")
         return jsonify({"msg": "Error retrieving websites", "error": str(e)}), 500
-    
+
+
 # PUT method to update website details by ID
 @upload_bp.route('/api/websites/<int:id>', methods=['PUT'])
 @jwt_required()  # Ensure the user is authenticated
@@ -222,6 +245,10 @@ def update_website(id):
                 """, (data['name'], data['url'], data['location'], id))
             conn.commit()
 
+        # Invalidate the relevant cache
+        delete_cache('total_websites_count')  # Clear cached total
+        delete_cache('websites_page_1_perpage_50_tendertype_Uploaded Websites')  # Optional: clear relevant cached pages
+
         return jsonify({"msg": "Website updated successfully"}), 200
     except Exception as e:
         logging.error(f"Error updating website: {e}")
@@ -238,6 +265,10 @@ def delete_website(id):
                 # Delete website from the database by id
                 cur.execute("DELETE FROM websites WHERE id = %s", (id,))
             conn.commit()
+
+        # Invalidate the relevant cache
+        delete_cache('total_websites_count')  # Clear cached total
+        delete_cache('websites_page_1_perpage_50_tendertype_Uploaded Websites')  # Optional: clear relevant cached pages
 
         return jsonify({"msg": "Website deleted successfully"}), 200
     except Exception as e:
@@ -259,6 +290,10 @@ def bulk_delete_websites():
                 # Delete websites in bulk
                 cur.execute("DELETE FROM websites WHERE id = ANY(%s)", (ids,))
             conn.commit()
+
+        # Invalidate the relevant cache
+        delete_cache('total_websites_count')  # Clear cached total
+        delete_cache('websites_page_1_perpage_50_tendertype_Uploaded Websites')  # Optional: clear relevant cached pages
 
         return jsonify({"msg": f"Deleted {len(ids)} websites successfully"}), 200
     except Exception as e:
