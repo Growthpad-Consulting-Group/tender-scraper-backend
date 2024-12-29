@@ -21,12 +21,17 @@ from app.scrapers.reliefweb_tenders import fetch_reliefweb_tenders
 from app.scrapers.scrape_jobinrwanda_tenders import scrape_jobinrwanda_tenders
 from app.scrapers.scrape_treasury_ke_tenders import scrape_treasury_ke_tenders
 from app.scrapers.website_scraper import scrape_tenders_from_websites
+from app.scrapers.query_scraper import scrape_tenders_from_query
 
 # Import blueprints for routing
 from app.routes.keywords.keyword_routes import keyword_bp
 from app.routes.terms.search_terms import search_terms_bp
 from app.routes.upload.upload_routes import upload_bp
 from app.routes.terms.directory_keywords import directory_keywords_bp
+from app.routes.terms.base_keywords import base_keywords_bp
+from app.routes.countries.countries import countries_bp
+from app.routes.closing_keywords.closing_keywords import closing_keywords_bp
+from app.routes.scraping_log.scraping_log import scraping_log_bp
 
 # Load environment variables from .env file
 load_dotenv()
@@ -55,6 +60,10 @@ app.register_blueprint(keyword_bp)
 app.register_blueprint(search_terms_bp)
 app.register_blueprint(upload_bp)
 app.register_blueprint(directory_keywords_bp)
+app.register_blueprint(base_keywords_bp)
+app.register_blueprint(countries_bp)
+app.register_blueprint(closing_keywords_bp)
+app.register_blueprint(scraping_log_bp)
 
 # Run the Flask application with SocketIO support
 if __name__ == '__main__':

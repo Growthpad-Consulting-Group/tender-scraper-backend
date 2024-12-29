@@ -2,7 +2,16 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import create_access_token, JWTManager, jwt_required, get_jwt_identity
 from app.config import get_db_connection
 import logging
-import datetime
+from datetime import datetime, timedelta
+from dateutil import parser
+from app.services.scheduler import scheduler
+from app.scrapers.ungm_tenders import scrape_ungm_tenders
+from app.scrapers.undp_tenders import scrape_undp_tenders
+from app.scrapers.reliefweb_tenders import fetch_reliefweb_tenders
+from app.scrapers.scrape_jobinrwanda_tenders import scrape_jobinrwanda_tenders
+from app.scrapers.scrape_treasury_ke_tenders import scrape_treasury_ke_tenders
+from app.scrapers.website_scraper import scrape_tenders_from_websites
+from app.scrapers.query_scraper import scrape_tenders_from_query
 
 task_manager_bp = Blueprint('task_manager', __name__)
 
@@ -13,7 +22,6 @@ task_manager_bp = Blueprint('task_manager', __name__)
 @jwt_required()
 def get_scraping_tasks():
     current_user = get_jwt_identity()
-
     logging.info(f"Fetching tasks for user_id: {current_user}")
 
     conn = get_db_connection()
@@ -21,7 +29,7 @@ def get_scraping_tasks():
 
     try:
         cur.execute("""
-            SELECT task_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type 
+            SELECT task_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, last_run 
             FROM scheduled_tasks
             WHERE user_id = %s
         """, (current_user,))
@@ -37,13 +45,13 @@ def get_scraping_tasks():
                 "is_enabled": task[6],
                 "tender_type": task[7],
                 "start_time": task[3],
-                "end_time": task[4]
+                "end_time": task[4],
+                "last_run": task[8]
             }
 
-            if task_dict["start_time"] is not None:
-                task_dict["start_time"] = task_dict["start_time"].isoformat()
-            if task_dict["end_time"] is not None:
-                task_dict["end_time"] = task_dict["end_time"].isoformat()
+            for key in ["start_time", "end_time", "last_run"]:
+                if task_dict[key] is not None:
+                    task_dict[key] = task_dict[key].isoformat()
 
             task_list.append(task_dict)
 
@@ -51,26 +59,46 @@ def get_scraping_tasks():
     except Exception as e:
         logging.error(f"Error fetching tasks: {str(e)}")
         return jsonify({"msg": "Error fetching tasks."}), 500
+    finally:
+        cur.close()  # Ensure cursor is closed
 
 
 # Task ID Along with User ID
 def generate_job_id(user_id, task_id):
     return f"user_{user_id}_task_{task_id}"
 
-
-def schedule_task_scrape(user_id, task_id, job_function, trigger, **trigger_args):
-    job_id = generate_job_id(user_id, task_id)
-
+def schedule_task_scrape(user_id, task_id, job_function, frequency):
+    job_id = f"user_{user_id}_task_{task_id}"
     existing_job = scheduler.get_job(job_id)
     if existing_job:
-        logging.info(f"Removing existing job {job_id} before rescheduling.")
         scheduler.remove_job(job_id)
 
-    try:
-        scheduler.add_job(job_function, trigger, id=job_id, **trigger_args)
-        logging.info('Scheduled job: %s', job_id)
-    except Exception as e:
-        logging.error("Error scheduling job %s: %s", job_id, str(e))
+    trigger = 'interval'
+    trigger_args = {
+        'Hourly': {'hours': 1},
+        'Every 3 Hours': {'hours': 3},
+        'Daily': {'days': 1},
+        'Every 12 Hours': {'hours': 12},
+        'Weekly': {'weeks': 1},
+        'Monthly': {'days': 30}  # Changed months to days (approximation)
+    }
+
+    if frequency in trigger_args:
+        scheduler.add_job(job_function, trigger, id=job_id, **trigger_args[frequency])
+        logging.info(f'Scheduled job: {job_id}')
+    else:
+        logging.warning(f'Unsupported frequency: {frequency}')
+
+
+# Function to log job events
+def log_task_event(task_id, user_id, log_message):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    created_at = datetime.now().isoformat()
+    cur.execute("INSERT INTO task_logs (task_id, user_id, log_entry, created_at) VALUES (%s, %s, %s, %s)",
+                (task_id, user_id, log_message, created_at))
+    conn.commit()
+    cur.close()  # Ensure cursor is closed
 
 
 # Function to log job events
@@ -80,15 +108,6 @@ def job_listener(event):
     else:
         logging.info('Job %s completed successfully.', event.job_id)
 
-
-# Function to log task events
-def log_task_event(task_id, user_id, log_message):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    created_at = datetime.now().isoformat()  # Use ISO format/UTC for consistency
-    cur.execute("INSERT INTO task_logs (task_id, user_id, log_entry, created_at) VALUES (%s, %s, %s, %s)",
-                (task_id, user_id, log_message, created_at))
-    conn.commit()
 
     # Route to clear logs
 
@@ -135,41 +154,67 @@ def add_task():
     name = data.get('name')
     frequency = data.get('frequency', 'Daily')
     priority = data.get('priority', 'Medium')
-    tender_type = data.get('tenderType', 'All')  # Handle tender type
+    tender_type = data.get('tenderType', 'All')
+    selected_terms = data.get('searchTerms', [])
+    search_engines = data.get('SEARCH_ENGINES', [])  # Capture search engines
+    search_engines_string = ','.join(search_engines)  # Join selected engines into a string
+    time_frame = data.get('timeFrame', None)  # Capture time frame
+    file_type = data.get('fileType', None)  # Capture file type
 
-    # If start_time and end_time are provided, parse them; otherwise, set defaults according to frequency
-    if data.get('startTime') and data.get('endTime'):
-        start_time = parser.parse(data.get('startTime'))
-        end_time = parser.parse(data.get('endTime'))
-    else:
-        current_time = datetime.now()
-        if frequency == 'Daily':
-            start_time = current_time.replace(hour=10, minute=0, second=0, microsecond=0)
-            end_time = start_time + timedelta(days=1)  # End time is the next day
-        elif frequency == 'Weekly':
-            start_time = current_time.replace(hour=10, minute=0, second=0, microsecond=0)
-            end_time = start_time + timedelta(weeks=1)  # End time is one week later
-        else:
-            return jsonify({"msg": "Frequency must be either 'Daily' or 'Weekly' or specify start and end times."}), 400
+    if not name:
+        return jsonify({"msg": "Task name is required."}), 400
 
-    if not name or start_time is None or end_time is None:
-        return jsonify({"msg": "Task name, start time, and end time are required."}), 400
+    current_time = datetime.now()
+    start_time = current_time
+    end_time = start_time + timedelta(days=365)
 
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO scheduled_tasks (user_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING task_id;
-    """, (
-        current_user, name, frequency, start_time, end_time, priority, False, tender_type))  # Include tender_type here
 
-    task_id = cur.fetchone()[0]  # Automatically generated task_id
+    # Insert the main task details into the scheduled_tasks table
+    cur.execute("""
+    INSERT INTO scheduled_tasks (user_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, search_engines, time_frame, file_type)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING task_id;
+""", (current_user, name, frequency, start_time, end_time, priority, True, tender_type, search_engines_string, time_frame, file_type))
+
+    task_id = cur.fetchone()[0]
     conn.commit()
 
-    log_task_event(task_id, current_user, f'Task "{name}" added successfully.')
+    # Now save the selected search terms into the task_search_terms table
+    if selected_terms:
+        for term in selected_terms:
+            try:
+                cur.execute("INSERT INTO task_search_terms (task_id, term) VALUES (%s, %s)", (task_id, term))
+            except Exception as e:
+                logging.error(f"Error inserting term '{term}' for task_id {task_id}: {str(e)}")
+    
+    # Commit after inserting the search terms
+    conn.commit()  # Ensure you commit the transaction after inserting terms
 
+
+# Optional: If needed, call the scraping function right away after creating the task
+    scraping_function = get_scraping_function(tender_type)
+    if scraping_function:
+        schedule_task_scrape(current_user, task_id, scraping_function, frequency)
+
+    log_task_event(task_id, current_user, f'Task "{name}" added successfully.')
+    cur.close()  # Ensure cursor is closed
     return jsonify({"msg": "Task added successfully.", "task_id": task_id}), 201
+
+def get_scraping_function(tender_type):
+    mapping = {
+        'UNGM Tenders': scrape_ungm_tenders,
+        'ReliefWeb Jobs': fetch_reliefweb_tenders,
+        'Job in Rwanda': scrape_jobinrwanda_tenders,
+        'Kenya Treasury': scrape_treasury_ke_tenders,
+        'UNDP': scrape_undp_tenders,
+        'Website Tenders': scrape_tenders_from_websites,
+        'Query Tenders': scrape_tenders_from_query
+    }
+    return mapping.get(tender_type)  # Return scraping function, or None if not found
+
+
 
 
 # Route to fetch logs
@@ -252,21 +297,13 @@ def cancel_task(task_id):
     if task[0] != current_user:
         return jsonify({"msg": "You do not have permission to cancel this task."}), 403
 
-    job_id = generate_job_id(current_user, task_id)
+    # Delete associated search terms first
+    cur.execute("DELETE FROM task_search_terms WHERE task_id = %s", (task_id,))
 
-    # Check if the job exists before trying to remove it
-    job = scheduler.get_job(job_id)
-    if job:
-        try:
-            scheduler.remove_job(job_id)
-            log_task_event(task_id, current_user, f'Task "{task_id}" canceled successfully.')
-        except Exception as e:
-            return jsonify({"msg": f"Failed to remove job {job_id}: {str(e)}"}), 500
-    else:
-        logging.warning(f"Job {job_id} not found in scheduler.")
-
+    # Now delete the task itself
     cur.execute("DELETE FROM scheduled_tasks WHERE task_id = %s", (task_id,))
     conn.commit()
+    cur.close()  # Ensure cursor is closed
 
     return jsonify({"msg": "Task canceled successfully."}), 200
 
@@ -320,14 +357,30 @@ def edit_task(task_id):
             return jsonify({"msg": "Invalid date format for start time or end time."}), 400
     else:
         current_time = datetime.now()
-        if frequency == 'Daily':
-            start_time = current_time.replace(hour=10, minute=0, second=0, microsecond=0)
-            end_time = start_time + timedelta(days=1)
+        if frequency == 'Hourly':
+            start_time = current_time.replace(minute=0, second=0, microsecond=0)  # Start at the top of the hour
+            end_time = start_time + timedelta(hours=1)  # End after 1 hour
+        elif frequency == 'Every 3 Hours':
+            start_time = current_time.replace(minute=0, second=0, microsecond=0)  # Start at the top of the hour
+            end_time = start_time + timedelta(hours=3)  # End after 3 hours
+        elif frequency == 'Every 12 Hours':
+            start_time = current_time.replace(hour=current_time.hour // 12 * 12, minute=0, second=0, microsecond=0)  # Start at noon or midnight.
+            end_time = start_time + timedelta(hours=12)  # End after 12 hours
+        elif frequency == 'Daily':
+            start_time = current_time.replace(hour=10, minute=0, second=0, microsecond=0)  # Fixed time
+            end_time = start_time + timedelta(days=1)  # End next day
         elif frequency == 'Weekly':
-            start_time = current_time.replace(hour=10, minute=0, second=0, microsecond=0)
-            end_time = start_time + timedelta(weeks=1)
+            start_time = current_time.replace(hour=10, minute=0, second=0, microsecond=0)  # Fixed time
+            end_time = start_time + timedelta(weeks=1)  # End next week
+        elif frequency == 'Monthly':
+            start_time = current_time.replace(day=1, hour=10, minute=0, second=0, microsecond=0)  # Start on the first day of the next month at 10 AM
+            if current_time.month == 12:
+                start_time = start_time.replace(year=current_time.year + 1, month=1)  # Adjust for January
+            else:
+                start_time = start_time.replace(month=current_time.month + 1)  # Move to the next month
+            end_time = start_time + timedelta(days=31)  # Set end time roughly 31 days later for simplicity
         else:
-            return jsonify({"msg": "Frequency must be either 'Daily' or 'Weekly' or specify start and end times."}), 400
+            return jsonify({"msg": "Unsupported frequency provided."}), 400
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -395,3 +448,56 @@ def get_next_schedule():
         return jsonify({"next_schedule": result[0]}), 200
     else:
         return jsonify({"next_schedule": "N/A"}), 200
+
+
+@task_manager_bp.route('/api/run-task/<int:task_id>', methods=['POST'])
+@jwt_required()
+def run_task(task_id):
+    current_user = get_jwt_identity()
+    logging.info(f"User {current_user} requested to run task ID {task_id}")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Fetch task details including search engines, time frame, file type
+    cur.execute("""
+        SELECT user_id, name, tender_type, frequency, search_engines, time_frame, file_type 
+        FROM scheduled_tasks 
+        WHERE task_id = %s
+    """, (task_id,))
+    task = cur.fetchone()
+
+    # Fetch search terms associated with the task
+    cur.execute("SELECT term FROM task_search_terms WHERE task_id = %s", (task_id,))
+    search_terms = [row[0] for row in cur.fetchall()]
+
+    if task is None or task[0] != current_user:
+        return jsonify({"msg": "Task not found or access denied."}), 404
+
+    task_name = task[1]
+    tender_type = task[2]
+    scraping_function = get_scraping_function(tender_type)
+
+    # Unpack parameters
+    selected_engines = task[4].split(',')  # Convert back to list
+    time_frame = task[5]         # Index 5 for time frame
+    file_type = task[6]          # Index 6 for file type
+
+    if scraping_function:
+        try:
+            logging.info(f"Running task '{task_name}' with tender type '{tender_type}'.")
+            # Call the scraping function with all required parameters
+            scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, terms=search_terms)
+            logging.info(f"Task '{task_name}' executed successfully.")
+        except Exception as e:
+            logging.error(f"Error running task '{task_name}': {str(e)}")
+            return jsonify({"msg": f"Error running task: {str(e)}"}), 500
+
+        # Update last_run timestamp
+        cur.execute("UPDATE scheduled_tasks SET last_run = %s WHERE task_id = %s", (datetime.now(), task_id))
+        conn.commit()
+
+        # Reschedule task based on frequency
+        schedule_task_scrape(current_user, task_id, scraping_function, task[3])  # Pass frequency directly
+
+    return jsonify({"msg": f"Task '{task_name}' has been executed."}), 200

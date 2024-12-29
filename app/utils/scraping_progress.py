@@ -4,7 +4,7 @@ from flask import request, jsonify
 from flask_socketio import SocketIO
 from flask_jwt_extended import jwt_required
 from app.scrapers.scraper import scrape_tenders
-from app.scrapers.ca_tenders import scrape_ca_tenders
+from app.scrapers.ungm_tenders import scrape_ungm_tenders
 from app.scrapers.undp_tenders import scrape_undp_tenders
 from app.scrapers.reliefweb_tenders import fetch_reliefweb_tenders
 from app.scrapers.scrape_jobinrwanda_tenders import scrape_jobinrwanda_tenders
@@ -13,7 +13,7 @@ from app.scrapers.website_scraper import scrape_tenders_from_websites
 
 def run_scraping_with_progress(socketio, tender_types):
     scraping_functions = {
-        'CA Tenders': scrape_ca_tenders,
+        'CA Tenders': scrape_ungm_tenders,
         'ReliefWeb Jobs': fetch_reliefweb_tenders,
         'Job in Rwanda': scrape_jobinrwanda_tenders,
         'Kenya Treasury': scrape_treasury_ke_tenders,

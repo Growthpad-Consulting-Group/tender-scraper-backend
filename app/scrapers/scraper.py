@@ -1,5 +1,5 @@
+import logging
 from app.config import get_db_connection  # Import function to establish database connection
-import logging  # For logging operation statuses and errors
 import requests  # For making HTTP requests to scrape data
 from bs4 import BeautifulSoup  # For parsing HTML content
 from datetime import datetime  # For handling date and time
@@ -14,13 +14,13 @@ from app.routes.tenders.tender_utils import (
     extract_description_from_response,
     is_relevant_tender
 )
+from urllib.parse import urlparse  # Import this to parse URLs
 import random  # For generating random delays
 import time  # For adding sleep delays between requests
 import re  # For regular expression operations
 from app.extensions import socketio  # Import your SocketIO instance here
+from app.services.log import ScrapingLog  # Import your custom logging class
 
-# Configure logging settings
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # List of common user agents to simulate different browsers
 USER_AGENTS = [
@@ -62,55 +62,82 @@ def scrape_tenders(db_connection, query, search_engines):
 
     total_steps = len(search_engines)  # Count the total search engines for progress calculation
 
-    # Loop through each specified search engine
     for i, engine in enumerate(search_engines):
         search_url = construct_search_url(engine, query)  # Construct the search URL
-        logging.info(f"Constructed Search URL for engine '{engine}': {search_url}")
+        ScrapingLog.add_log(f"Constructed Search URL for engine '{engine}': {search_url}")
 
-        # Set a random user agent from the list to simulate browser requests
         headers = {
             "User-Agent": random.choice(USER_AGENTS),
         }
 
-        # Add a random delay before sending the request to avoid rate limiting
-        time.sleep(random.uniform(1, 3))
+        time.sleep(random.uniform(1, 3))  # Add a random delay
 
         try:
-            # Make the HTTP GET request to the constructed search URL
             response = requests.get(search_url, headers=headers)
             response.raise_for_status()  # Raise an error for bad responses
-            soup = BeautifulSoup(response.content, 'html.parser')  # Parse the response content with BeautifulSoup
+            soup = BeautifulSoup(response.content, 'html.parser')  # Parse the response content
 
-            # Extract links from the search results
             links = soup.find_all('a', href=True)
             for link in links:
                 href = link['href']
-                actual_url = extract_actual_link_from_search_result(href, engine)  # Get the actual URL from the search result
+                actual_url = extract_actual_link_from_search_result(href, engine)  # Get the actual URL
 
-                # Skip internal pages and excluded domains
                 if "google.com" in actual_url or any(domain in actual_url for domain in excluded_domains):
                     continue
 
-                # Check if the extracted URL is valid before scraping
                 if is_valid_url(actual_url):
-                    logging.info(f"Visiting URL: {actual_url}")
-                    tender_details = scrape_tender_details(actual_url, link.text.strip(), headers, db_connection)  # Pass the title
+                    ScrapingLog.add_log(f"Visiting URL: {actual_url}")
+                    tender_title = clean_title(link.text.strip())
+
+                    # Log the cleaned title before you scrape for details
+                    # ScrapingLog.add_log(f"Clean Title to Scrape: '{tender_title}'")
+
+                    tender_details = scrape_tender_details(actual_url, tender_title, headers, db_connection)  # Pass the cleaned title
                     if tender_details:
                         tenders.append(tender_details)  # Add the tender details to the list
 
-            # Emit progress update after processing an engine's results
             progress = ((i + 1) / total_steps) * 100
-            logging.info(f'Emitting progress: {progress}%')
+            # ScrapingLog.add_log(f'Emitting progress: {progress}%')
+            logging.info(f"Emitting progress: {progress}%")
             socketio.emit('scraping_progress', {'progress': progress})  # Emit the progress
 
         except requests.exceptions.HTTPError as http_err:
-            logging.error(f"Error scraping {search_url}: {str(http_err)}")
-            continue  # Continue on errors
+            ScrapingLog.add_log(f'Error scraping {search_url}: {str(http_err)}')
+            continue
 
-    # Emit that scraping is complete
-    logging.info(f"Scraping completed. Total tenders found: {len(tenders)}")
     socketio.emit('scraping_complete', {})
     return tenders  # Return the list of scraped tenders
+
+def clean_title(title):
+    """
+    Cleans the title by removing URLs, unwanted text, and hyphens.
+
+    Args:
+        title (str): The title to clean.
+
+    Returns:
+        str: The cleaned title without URLs, unwanted segments, or hyphens.
+    """
+    # print(f"Original Title Before Clean: '{title}'")  # For debugging
+    # ScrapingLog.add_log(f"Original Title Before Clean: '{title}'")
+
+    # Remove any URLs (http, https, www, etc.)
+    clean_title = re.sub(r'https?://\S+|www\.\S+', '', title)  # Remove any URLs
+    clean_title = re.sub(r'\s*›.*$', '', clean_title)  # Remove everything after '›'
+
+    # Remove domain-like patterns and any suffixes (e.g., chrips.or.ke) with preceding spaces or hyphens
+    clean_title = re.sub(r'[\w.-]+\.[a-zA-Z]{2,}[\s-]*', '', clean_title)
+
+    # Remove hyphens
+    clean_title = clean_title.replace('-', '')  # Remove all hyphens
+
+    # Remove leading/trailing spaces and handle excessive spaces
+    clean_title = re.sub(r'^\s*|\s*$', '', clean_title)  # Remove whitespace from the start and end
+    clean_title = re.sub(r'\s+', ' ', clean_title)  # Collapse multiple spaces to a single space
+
+    # ScrapingLog.add_log(f"Cleaned Title After Clean: '{clean_title.strip()}'")
+    return clean_title.strip()
+
 
 def extract_actual_link_from_search_result(href, engine):
     """
@@ -141,131 +168,198 @@ def is_valid_url(url):
     """
     return re.match(r'https?://', url) is not None  # Validate the URL format
 
-def scrape_tender_details(url, title, headers, db_connection):
+def log_scraping_details(db_connection, website_name, visiting_url, tenders_found,
+                         tender_title, closing_date, closing_keyword,
+                         filtered_keyword, is_relevant, status):
     """
-    Scrapes the actual tender details from the specific URL.
-
+    Logs the scraping details into the database, updating existing entries based on visiting_url.
+    
     Args:
-        url (str): The URL from which to scrape tender details.
-        title (str): The title of the tender extracted from the search results.
-        headers (dict): HTTP headers for the request.
-        db_connection: The active database connection object.
-
-    Returns:
-        dict or None: A dictionary containing tender info if successful, else None.
+        db_connection: Database connection object
+        website_name (str): Name of the website
+        visiting_url (str): URL being visited
+        tenders_found (bool): Whether tenders were found
+        tender_title (str): Title of the tender
+        closing_date (date): Closing date of the tender
+        closing_keyword (str): Keyword used to identify closing date
+        filtered_keyword (str): Keywords matched in the tender
+        is_relevant (str): "Yes" or "No" string indicating relevance
+        status (str): Status of the tender
     """
-    time.sleep(random.uniform(1, 3))  # Random delay to mimic human browsing
     try:
-        response = requests.get(url, headers=headers)  # Fetch the tender page
-        response.raise_for_status()  # Check for HTTP errors
+        with db_connection.cursor() as cursor:
+            # Convert boolean tenders_found to integer
+            tenders_found_int = 1 if tenders_found else 0
 
-        # Extract the content format
-        format_type = get_format(url)  # Determine content format (PDF, DOCX, HTML)
+            # Convert Yes/No to boolean for relevant field
+            is_relevant_bool = is_relevant.lower() == 'yes'
 
-        # Initialize text variable
+            # Check if the visiting_url already exists
+            check_query = """
+            SELECT id FROM scraping_log WHERE visiting_url = %s;
+            """
+            cursor.execute(check_query, (visiting_url,))
+            existing_record = cursor.fetchone()
+
+            if existing_record:
+                update_query = """
+                UPDATE scraping_log
+                SET website_name = %s, 
+                    tenders_found = %s, 
+                    tender_title = %s, 
+                    closing_date = %s,
+                    closing_keyword = %s, 
+                    filtered_keyword = %s, 
+                    relevant = %s, 
+                    status = %s, 
+                    created_at = NOW()
+                WHERE visiting_url = %s;
+                """
+                cursor.execute(update_query, (
+                    website_name,
+                    tenders_found_int,
+                    tender_title,
+                    closing_date,
+                    closing_keyword,
+                    filtered_keyword,
+                    is_relevant_bool,
+                    status,
+                    visiting_url
+                ))
+            else:
+                insert_query = """
+                INSERT INTO scraping_log (
+                    website_name, 
+                    visiting_url, 
+                    tenders_found, 
+                    tender_title, 
+                    closing_date,
+                    closing_keyword, 
+                    filtered_keyword, 
+                    relevant, 
+                    status, 
+                    created_at
+                ) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW());
+                """
+                cursor.execute(insert_query, (
+                    website_name,
+                    visiting_url,
+                    tenders_found_int,
+                    tender_title,
+                    closing_date,
+                    closing_keyword,
+                    filtered_keyword,
+                    is_relevant_bool,
+                    status
+                ))
+
+            db_connection.commit()
+            # ScrapingLog.add_log("Log entry successfully inserted/updated in scraping_log table.")
+            logging.info(f"Log entry successfully inserted/updated in scraping_log table.")
+
+    except Exception as e:
+        ScrapingLog.add_log(f"Error in logging tender details: {str(e)}")
+        if db_connection:
+            db_connection.rollback()
+
+
+
+
+def scrape_tender_details(url, title, headers, db_connection):
+    time.sleep(random.uniform(1, 3))
+    description = ""
+
+    parsed_url = urlparse(url)
+    website_name = f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+    # Ensure tender_title is initialized correctly
+    tender_title = title.strip()
+
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+
+        format_type = get_format(url)
         extracted_text = ""
 
-        # Check the content format for text extraction
+        # Extract text based on the format
         if format_type == 'PDF':
             extracted_text = extract_pdf_text(response.content)
         elif format_type == 'DOCX':
             extracted_text = extract_docx_text(response.content)
-        else:  # Assume HTML
-            extracted_text = BeautifulSoup(response.content, 'html.parser').get_text()
+        else:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            h1_tags = soup.find('h1')
+            h2_tags = soup.find('h2')
+            tender_title = (h1_tags.text.strip() if h1_tags else h2_tags.text.strip() if h2_tags else tender_title)
 
-        closing_dates = extract_closing_dates(extracted_text, db_connection)  # Now pass the extracted text
+            description = " ".join(p.text.strip() for p in soup.find_all('p')[:2]) if soup.find_all('p') else ""
+            extracted_text = f"{tender_title} {description}"
 
-        # Initialize a variable to track the relevant keyword
-        filtered_keyword = None
-        is_relevant = "No"  # Default value for relevance
+        # Extract closing dates now
+        closing_dates = extract_closing_dates(extracted_text, db_connection)
 
-        if closing_dates:  # If closing dates were found
-            for date, keyword in closing_dates:  # Process each closing date found
+        log_tenders_found = 0
+
+        if closing_dates:
+            for date, keyword in closing_dates:
                 try:
-                    closing_date_parsed = parse_closing_date(date)  # Parse the date string
-
-                    # Now check for relevance using the extracted text
+                    closing_date_parsed = parse_closing_date(date)
                     filtered_keyword = is_relevant_tender(extracted_text, db_connection)
+                    is_relevant = "Yes" if filtered_keyword else "No"
 
-                    # Determining relevance
-                    if filtered_keyword:
-                        is_relevant = "Yes"
-
-                    # Create a dictionary to hold tender information
                     tender_info = {
-                        'title': title,
-                        'description': extract_description_from_response(response, format_type),
+                        'title': tender_title,
+                        'description': description,
                         'closing_date': closing_date_parsed,
                         'source_url': url,
                         'status': "open" if closing_date_parsed > datetime.now().date() else "closed",
                         'format': format_type,
                         'scraped_at': datetime.now().date(),
-                        'tender_type': 'Uploaded Websites'
+                        'tender_type': 'Uploaded Websites',
+                        'is_relevant': is_relevant,
+                        'filtered_based_on': filtered_keyword,  # Additional field
+
                     }
 
-                    logging.info("====================================")
-                    logging.info("Found Tender")
-                    logging.info(f"Tender Title: {tender_info['title']}")
-                    logging.info(f"Closing Date: {closing_date_parsed}")
-                    logging.info(f"Closing Date Keyword Found: {keyword}")
-                    logging.info(f"Status: {tender_info['status']}")
-                    logging.info(f"Tender Type: {tender_info['tender_type']}")
-                    logging.info(f"Filtered Based on: {filtered_keyword if filtered_keyword else 'None'}")
-                    logging.info(f"Relevant Tender: {is_relevant}")
-                    logging.info("====================================")
+                    # Log tender information
+                    ScrapingLog.add_log("====================================")
+                    ScrapingLog.add_log("Found Tender")
+                    ScrapingLog.add_log(f"Tender Title: {tender_info['title']}")
+                    ScrapingLog.add_log(f"Closing Date: {closing_date_parsed}")
+                    ScrapingLog.add_log(f"Closing Date Keyword Found: {keyword}")
+                    ScrapingLog.add_log(f"Status: {tender_info['status']}")
+                    ScrapingLog.add_log(f"Tender Type: {tender_info['tender_type']}")
+                    ScrapingLog.add_log(f"Filtered Based on: {filtered_keyword}")
+                    ScrapingLog.add_log(f"Relevant Tender: {is_relevant}")
+                    ScrapingLog.add_log("====================================")
 
-                    # If the tender is relevant, attempt to insert it into the database
+                    # Log scraping details
+                    log_scraping_details(db_connection, website_name, url, True, tender_info['title'],
+                                         closing_date_parsed, keyword, filtered_keyword, is_relevant, tender_info['status'])
+
+                    # Insert the tender into the database if relevant
                     if is_relevant == "Yes":
-                        insertion_status = insert_tender_to_db(tender_info, db_connection)
-                        if insertion_status:
-                            logging.info("Inserted into database: Success")
-                        else:
-                            logging.error("Inserting into database: Failed")
+                        try:
+                            insertion_status = insert_tender_to_db(tender_info, db_connection)
+                            if insertion_status:
+                                ScrapingLog.add_log(f"Inserted tender into database: Success - {tender_info['title']}")
+                            else:
+                                ScrapingLog.add_log(f"Inserting tender into database: Failed - {tender_info['title']}")
+                        except Exception as insert_err:
+                            # ScrapingLog.add_log(f"Error inserting tender into database: {str(insert_err)}")
+                            logging.info(f"Error inserting tender into database: {str(insert_err)}")
 
-                    return tender_info  # Return the scraped tender info
-                except ValueError as ve:
-                    logging.error(f"Error parsing date for tender from '{url}': {str(ve)}")
+                    return tender_info  # Return this structured data
+
+                except Exception as ve:
+                    ScrapingLog.add_log(f"Error processing closing date for tender from '{url}': {str(ve)}")
+
+        else:
+            ScrapingLog.add_log(f"No closing dates found for URL: {url}")
+            return None  # Return None if no tenders found
+
     except Exception as e:
-        logging.error(f"Could not scrape the tender details from {url}: {str(e)}")
-    return None  # Return None if scraping failed
-
-
-
-def extract_closing_dates_from_content(response, format_type, db_connection):
-    """
-    Extracts closing dates based on the content format of the response.
-
-    Args:
-        response: The HTTP response object containing content.
-        format_type (str): The format type of the content ('PDF', 'DOCX', 'HTML').
-        db_connection: The active database connection object.
-
-    Returns:
-        list: A list of closing dates and associated keywords extracted from the content.
-    """
-    if format_type == 'PDF':
-        pdf_text = extract_pdf_text(response.content)  # Extract text from the PDF
-        return extract_closing_dates(pdf_text, db_connection)  # Pass db_connection to extract closing dates
-    elif format_type == 'DOCX':
-        docx_text = extract_docx_text(response.content)  # Extract text from the DOCX
-        return extract_closing_dates(docx_text, db_connection)  # Pass db_connection to extract closing dates
-    else:  # Assuming it's HTML
-        soup = BeautifulSoup(response.content, 'html.parser')  # Parse HTML
-        page_text = soup.get_text()  # Get all text content from the page
-        return extract_closing_dates(page_text, db_connection)  # Pass db_connection to extract closing dates
-
-
-# The script's entry point when executed directly
-if __name__ == "__main__":
-    db_connection = get_db_connection()  # Establish the database connection
-    try:
-        # Construct a search query using keywords and the current year
-        query = construct_search_query("tender", get_keywords_and_terms(), datetime.now().year)
-        # Call the scraping function to fetch tenders
-        scraped_tenders = scrape_tenders(db_connection, query, SEARCH_ENGINES)
-        logging.info(f"Scraped tenders: {scraped_tenders}")  # Log the scraped tenders
-    finally:
-        # Ensure the database connection is closed properly
-        if db_connection:
-            db_connection.close()  # Close the database connection
-            logging.info("Database connection closed.")
+        ScrapingLog.add_log(f"Error processing tender details for URL {url}: {str(e)}")
+        return None  # Return None if there is an exception

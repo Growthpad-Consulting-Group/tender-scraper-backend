@@ -1,10 +1,8 @@
 from app.config import get_db_connection  # Import function to establish database connection
 from app.scrapers.scraper import scrape_tenders  # Import the function used for scraping tenders
 from datetime import datetime  # For handling date and time
-import logging  # For logging operation statuses and errors
-
-# Configure logging settings
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from app.services.log import ScrapingLog  # Import your custom logging class
+from app.scrapers.scraper_status import scraping_status  # Import the global scraping status
 
 def fetch_urls_and_terms(db_connection):
     """
@@ -17,6 +15,7 @@ def fetch_urls_and_terms(db_connection):
         tuple: A tuple containing a list of URLs and a list of search terms.
     """
     try:
+        # Use 'with' to ensure that the cursor is closed properly after use
         with db_connection.cursor() as cur:
             # Execute query to fetch all URLs from the 'websites' table
             cur.execute("SELECT url FROM websites")
@@ -26,78 +25,112 @@ def fetch_urls_and_terms(db_connection):
             cur.execute("SELECT term FROM search_terms")
             search_terms = [row[0] for row in cur.fetchall()]  # Retrieve search terms
 
-        # Print the fetched URLs and search terms for debugging purposes
-        print(f"Fetched URLs: {urls}")
-        print(f"Fetched Search Terms: {search_terms}")
-        return urls, search_terms  # Return a tuple of URLs and search terms
+            # Logging the fetched results
+            # ScrapingLog.add_log(f"Fetched URLs: {urls}")
+            # ScrapingLog.add_log(f"Fetched Search Terms: {search_terms}")
+            return urls, search_terms  # Return the results as a tuple
 
     except Exception as e:
-        # Log any error encountered during the fetching process
-        logging.error(f"Error fetching URLs and search terms: {e}")
+        # Log any error encountered
+        ScrapingLog.add_log(f"Error in fetch_urls_and_terms: {e}")
         return [], []  # Return empty lists in case of error
 
-def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_type=None, terms=None, region=None):
+
+
+
+def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_type=None, terms=None, website=None):
     """
     Scrapes tenders from specified websites using search terms and stores results in the database.
-
-    Args:
-        selected_engines (list, optional): List of search engines to use; defaults to None.
-        time_frame (str, optional): Time frame for scraping; defaults to None.
-        file_type (str, optional): Type of files to consider; defaults to None.
-        terms (list, optional): List of search terms to use for scraping; defaults to None.
-        region (str, optional): The geographical region for which to scrape tenders; defaults to None.
     """
     db_connection = None
+    global scraping_status  # Access the global variable to update scraping status
+    scraping_status['tenders'] = []
+
     try:
-        # Establish database connection
+        terms = terms or []
+
+        if not terms:
+            ScrapingLog.add_log("Error: No search terms provided.")
+            return  # Exit early if no terms to search with
+
         db_connection = get_db_connection()
 
-        # Fetch URLs and search terms from the database
         urls, search_terms = fetch_urls_and_terms(db_connection)
 
-        # Get the current year for the query
+        if website:
+            urls = [website]  # If a specific website is provided, only scrape that one
+
+        if not urls:
+            ScrapingLog.add_log("Error: No URLs fetched from the database.")
+            return  # Exit early if no URLs are fetched
+
         current_year = datetime.now().year
 
-        # Construct queries for scraping with URLs, search terms and region.
         google_queries = [
-            f'site:{url.split("//")[1].rstrip("/")} ("{terms[0]}" OR "{terms[1]}") {current_year}' +
-            f"&as_qdr={time_frame}&" +  # Date range filter (e.g., 'qdr:y' for the past year)
-            f"as_epq=&" +  # Optional exact phrase (empty for now)
-            f"&as_eq=&as_nlo=&as_nhi=&lr=&" +  # Various empty filters (as_eq = exact match, etc.)
-            f"cr=country{region}&" +  # Country filter (e.g., countryKE)
-            (f"as_filetype={file_type}&" if file_type and file_type != 'any' else "") +  # Add filetype filter if not 'any'
-            f"as_occt=any&" +  # Correct placement of any file type filter if added
-            f"tbs="  # Optional for additional filters, though in this case not necessary
+            f'site:{url.split("//")[1].rstrip("/")} ' +
+            " OR ".join([f'"{term}"' for term in terms]) +
+            (f" {current_year}" if time_frame == 'y' else '') +
+            (f"&as_qdr={time_frame}" if time_frame != 'anytime' else '') +
+            f"&as_eq=&as_nlo=&as_nhi=&lr=&" +
+            (f"as_filetype={file_type}&" if file_type and file_type != 'any' else "") +
+            f"as_occt=any&" +
+            f"tbs="
             for url in urls
         ]
 
+        ScrapingLog.add_log(f"Google queries: {google_queries}")
 
-
-
-        bing_yahoo_queries = [
-            f'site:{url.split("//")[1].rstrip("/")} ("{terms[0]}" OR "{terms[1]}")'
-            for url in urls
-        ]
-
-        # Initialize lists for storing all scraped tenders and counting found tenders
-        all_tenders = []
         total_found_tenders = 0
+        total_relevant_tenders = 0
+        total_irrelevant_tenders = 0
+        total_open_tenders = 0
+        total_closed_tenders = 0
 
-        # Choose queries based on selected engines
-        for query in google_queries if 'Google' in selected_engines else bing_yahoo_queries:
-            logging.info(f"Scraping for query: {query}")  # Log the current query being scraped
-            # Call the scraping function and collect the returned tenders
-            scraped_tenders = scrape_tenders(db_connection, query, selected_engines)
+        for query in google_queries:
+            ScrapingLog.add_log(f"Scraping for query: {query}")
 
-            # Count the total number of tenders found after scraping each query
-            total_found_tenders += len(scraped_tenders)
-            all_tenders.extend(scraped_tenders)  # Add newly scraped tenders to the list
+            try:
+                scraped_tenders = scrape_tenders(db_connection, query, selected_engines)
 
-        logging.info(f"Scraping completed. Total tenders found: {total_found_tenders}")  # Log total found tenders
+                total_found_tenders += len(scraped_tenders)
+
+                for tender in scraped_tenders:
+                    scraping_status['tenders'].append(tender)
+                    # Assuming each tender is a dictionary returned from scrape_tender_details
+                    is_relevant = tender.get('is_relevant', 'No')  # Default to 'No'
+                    status = tender.get('status', 'unknown')  # Default to 'unknown'
+
+                    if is_relevant == "Yes":
+                        total_relevant_tenders += 1
+                    else:
+                        total_irrelevant_tenders += 1
+
+                    if status == "open":
+                        total_open_tenders += 1
+                    elif status == "closed":
+                        total_closed_tenders += 1
+
+            except Exception as e:
+                ScrapingLog.add_log(f"Error scraping for query {query}: {e}")
+
+        # Log counts after processing all queries
+        ScrapingLog.add_log(f"Scraping completed. Total tenders found: {total_found_tenders}, "
+                            f"Relevant: {total_relevant_tenders}, "
+                            f"Irrelevant: {total_irrelevant_tenders}, "
+                            f"Open: {total_open_tenders}, "
+                            f"Closed: {total_closed_tenders}")
+
+        scraping_status.update({
+            'complete': True,
+            'total_found': total_found_tenders,
+            'relevant_count': total_relevant_tenders,
+            'irrelevant_count': total_irrelevant_tenders,
+            'open_count': total_open_tenders,
+            'closed_count': total_closed_tenders
+        })
 
     except Exception as e:
-        # Log any error encountered during scraping
-        logging.error(f"An error occurred while scraping: {e}")
+        ScrapingLog.add_log(f"An error occurred while scraping: {e}")
 
     finally:
         if db_connection is not None:
