@@ -37,7 +37,6 @@ def fetch_urls_and_terms(db_connection):
 
 
 
-
 def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_type=None, terms=None, website=None):
     """
     Scrapes tenders from specified websites using search terms and stores results in the database.
