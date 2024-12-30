@@ -9,26 +9,24 @@ import os
 from datetime import timedelta  # Import timedelta for setting expiration times
 
 # Import custom modules and services
-from app import create_app
+from app import create_app, socketio  # Import socketio here if needed
 from app.services.scheduler import start_scheduler, shutdown_scheduler
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Create Flask app and SocketIO instance
-app, socketio = create_app()  # This initializes the app and socketio
+# Create Flask app
+app = create_app()  # This initializes the app
 
 # Configure logging for the application
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # JWT setup: Retrieve secret key from environment variables
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
-
-# Set reasonable expiration for tokens
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=60)  # Access tokens expire in 60 minutes
 app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=14)     # Refresh tokens expire in 14 days
 
-# Initialize JWT
+# Initialize JWT with the app instance
 jwt = JWTManager(app)
 
 # Start background scheduler for periodic tasks and register graceful shutdown

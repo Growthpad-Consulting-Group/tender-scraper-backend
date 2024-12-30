@@ -13,6 +13,7 @@ from .services.query_scan import query_scan_bp
 # Initialize the extensions
 jwt = JWTManager()
 socketio = SocketIO(cors_allowed_origins='*')  # Initialize SocketIO instance
+jwt = JWTManager()  # Create without passing the app
 
 def create_app():
     app = Flask(__name__)  # Initialize the app object
@@ -42,4 +43,4 @@ def create_app():
     app.register_blueprint(quick_scan_bp)
     app.register_blueprint(query_scan_bp)
 
-    return app, socketio  # Return both app and socketio instances
+    return app  # Return only the app instance
