@@ -1,5 +1,5 @@
 from flask import Flask, jsonify
-from flask_cors import CORS
+from flask_cors import CORS  # Import Flask-CORS
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
 import os
@@ -19,6 +19,10 @@ def create_app():
     global app  # Use the global app variable
     # Load configurations
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
+
+    # Enable CORS (Cross-Origin Resource Sharing)
+    # Allowing only the frontend domain to access the backend API
+    CORS(app, resources={r"/*": {"origins": "https://tender.growthpad.co.ke"}})
 
     # Initialize extensions
     socketio.init_app(app)  # Correctly initialize the SocketIO instance
