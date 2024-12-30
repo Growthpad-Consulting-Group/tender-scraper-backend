@@ -7,8 +7,8 @@ import atexit
 import os
 from datetime import timedelta
 
-from app import create_app, socketio
-from app.services.scheduler import start_scheduler, shutdown_scheduler
+from webapp import create_app, socketio
+from webapp.services.scheduler import start_scheduler, shutdown_scheduler
 
 load_dotenv()
 
@@ -31,14 +31,14 @@ start_scheduler()
 atexit.register(shutdown_scheduler)
 
 # Register blueprints
-from app.routes.keywords.keyword_routes import keyword_bp
-from app.routes.terms.search_terms import search_terms_bp
-from app.routes.upload.upload_routes import upload_bp
-from app.routes.terms.directory_keywords import directory_keywords_bp
-from app.routes.terms.base_keywords import base_keywords_bp
-from app.routes.countries.countries import countries_bp
-from app.routes.closing_keywords.closing_keywords import closing_keywords_bp
-from app.routes.scraping_log.scraping_log import scraping_log_bp
+from webapp.routes.keywords.keyword_routes import keyword_bp
+from webapp.routes.terms.search_terms import search_terms_bp
+from webapp.routes.upload.upload_routes import upload_bp
+from webapp.routes.terms.directory_keywords import directory_keywords_bp
+from webapp.routes.terms.base_keywords import base_keywords_bp
+from webapp.routes.countries.countries import countries_bp
+from webapp.routes.closing_keywords.closing_keywords import closing_keywords_bp
+from webapp.routes.scraping_log.scraping_log import scraping_log_bp
 
 app.register_blueprint(keyword_bp)
 app.register_blueprint(search_terms_bp)
