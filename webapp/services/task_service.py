@@ -15,7 +15,10 @@ from webapp.scrapers.query_scraper import scrape_tenders_from_query
 
 task_manager_bp = Blueprint('task_manager', __name__)
 
-
+def get_search_terms(cur, task_id):
+    """Fetch search terms associated with a task by task_id."""
+    cur.execute("SELECT term FROM task_search_terms WHERE task_id = %s", (task_id,))
+    return [row[0] for row in cur.fetchall()]
 
 # Route to get all scraping tasks
 @task_manager_bp.route('/api/scraping-tasks', methods=['GET'])
@@ -156,10 +159,10 @@ def add_task():
     priority = data.get('priority', 'Medium')
     tender_type = data.get('tenderType', 'All')
     selected_terms = data.get('searchTerms', [])
-    search_engines = data.get('SEARCH_ENGINES', [])  # Capture search engines
-    search_engines_string = ','.join(search_engines)  # Join selected engines into a string
-    time_frame = data.get('timeFrame', None)  # Capture time frame
-    file_type = data.get('fileType', None)  # Capture file type
+    search_engines = data.get('SEARCH_ENGINES', [])
+    time_frame = data.get('timeFrame', None)
+    file_type = data.get('fileType', None)
+    selected_region = data.get('selectedRegion', None)  # New: Capture selected region
 
     if not name:
         return jsonify({"msg": "Task name is required."}), 400
@@ -171,35 +174,44 @@ def add_task():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Insert the main task details into the scheduled_tasks table
+    # Update SQL to include selected region
     cur.execute("""
-    INSERT INTO scheduled_tasks (user_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, search_engines, time_frame, file_type)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    RETURNING task_id;
-""", (current_user, name, frequency, start_time, end_time, priority, True, tender_type, search_engines_string, time_frame, file_type))
+INSERT INTO scheduled_tasks (
+    user_id, name, frequency, start_time, end_time, 
+    priority, is_enabled, tender_type, 
+    search_engines, time_frame, file_type, selected_region
+)
+VALUES (
+    %s, %s, %s, %s, %s, 
+    %s, %s, %s, 
+    %s, %s, %s, %s
+)
+RETURNING task_id;
+""", (
+        current_user, name, frequency, start_time, end_time,
+        priority, True, tender_type,
+        ','.join(search_engines), time_frame, file_type, selected_region))
 
     task_id = cur.fetchone()[0]
     conn.commit()
 
-    # Now save the selected search terms into the task_search_terms table
+    # Insert search terms after task creation
     if selected_terms:
         for term in selected_terms:
             try:
                 cur.execute("INSERT INTO task_search_terms (task_id, term) VALUES (%s, %s)", (task_id, term))
             except Exception as e:
                 logging.error(f"Error inserting term '{term}' for task_id {task_id}: {str(e)}")
-    
-    # Commit after inserting the search terms
-    conn.commit()  # Ensure you commit the transaction after inserting terms
 
+    conn.commit()
 
-# Optional: If needed, call the scraping function right away after creating the task
+    # Optional: Call scraping function
     scraping_function = get_scraping_function(tender_type)
     if scraping_function:
         schedule_task_scrape(current_user, task_id, scraping_function, frequency)
 
     log_task_event(task_id, current_user, f'Task "{name}" added successfully.')
-    cur.close()  # Ensure cursor is closed
+    cur.close()
     return jsonify({"msg": "Task added successfully.", "task_id": task_id}), 201
 
 def get_scraping_function(tender_type):
@@ -459,9 +471,9 @@ def run_task(task_id):
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Fetch task details including search engines, time frame, file type
+    # Fetch task details including search engines, time frame, and file type
     cur.execute("""
-        SELECT user_id, name, tender_type, frequency, search_engines, time_frame, file_type 
+        SELECT user_id, name, tender_type, frequency, search_engines, time_frame, file_type, selected_region 
         FROM scheduled_tasks 
         WHERE task_id = %s
     """, (task_id,))
@@ -470,37 +482,29 @@ def run_task(task_id):
     if task is None or task[0] != current_user:
         return jsonify({"msg": "Task not found or access denied."}), 404
 
-    # Fetch search terms associated with the task
-    cur.execute("SELECT term FROM task_search_terms WHERE task_id = %s", (task_id,))
-    search_terms = [row[0] for row in cur.fetchall()]
+    search_terms = get_search_terms(cur, task_id)
 
-    # Log the retrieved search terms for debugging
-    logging.info(f"Retrieved search terms for task ID {task_id}: {search_terms}")
-
-    task_name = task[1]
-    tender_type = task[2]
-    scraping_function = get_scraping_function(tender_type)
-
-    # Unpack parameters
     selected_engines = task[4].split(',')  # Convert back to list
-    time_frame = task[5]         # Index 5 for time frame
-    file_type = task[6]          # Index 6 for file type
+    time_frame = task[5]  # Index 5 for time frame
+    file_type = task[6]   # Index 6 for file type
+    selected_region = task[7]  # New: Capture selected region
 
+    scraping_function = get_scraping_function(task[2])
     if scraping_function:
         try:
-            logging.info(f"Running task '{task_name}' with tender type '{tender_type}' and search terms: {search_terms}.")
+            logging.info(f"Running task '{task[1]}' with selected region '{selected_region}' and search terms: {search_terms}.")
             # Call the scraping function with all required parameters
-            scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, terms=search_terms)
-            logging.info(f"Task '{task_name}' executed successfully.")
+            scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, region=selected_region, terms=search_terms)
+            logging.info(f"Task '{task[1]}' executed successfully.")
         except Exception as e:
-            logging.error(f"Error running task '{task_name}': {str(e)}")
+            logging.error(f"Error running task '{task[1]}': {str(e)}")
             return jsonify({"msg": f"Error running task: {str(e)}"}), 500
 
-        # Update last_run timestamp
+        # Update last_run timestamp and commit
         cur.execute("UPDATE scheduled_tasks SET last_run = %s WHERE task_id = %s", (datetime.now(), task_id))
         conn.commit()
 
-        # Reschedule task based on frequency
-        schedule_task_scrape(current_user, task_id, scraping_function, task[3])  # Pass frequency directly
+        # Optional: Reschedule
+        schedule_task_scrape(current_user, task_id, scraping_function, task[3])
 
-    return jsonify({"msg": f"Task '{task_name}' has been executed."}), 200
+    return jsonify({"msg": f"Task '{task[1]}' has been executed."}), 200
