@@ -467,12 +467,15 @@ def run_task(task_id):
     """, (task_id,))
     task = cur.fetchone()
 
+    if task is None or task[0] != current_user:
+        return jsonify({"msg": "Task not found or access denied."}), 404
+
     # Fetch search terms associated with the task
     cur.execute("SELECT term FROM task_search_terms WHERE task_id = %s", (task_id,))
     search_terms = [row[0] for row in cur.fetchall()]
 
-    if task is None or task[0] != current_user:
-        return jsonify({"msg": "Task not found or access denied."}), 404
+    # Log the retrieved search terms for debugging
+    logging.info(f"Retrieved search terms for task ID {task_id}: {search_terms}")
 
     task_name = task[1]
     tender_type = task[2]
@@ -485,7 +488,7 @@ def run_task(task_id):
 
     if scraping_function:
         try:
-            logging.info(f"Running task '{task_name}' with tender type '{tender_type}'.")
+            logging.info(f"Running task '{task_name}' with tender type '{tender_type}' and search terms: {search_terms}.")
             # Call the scraping function with all required parameters
             scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, terms=search_terms)
             logging.info(f"Task '{task_name}' executed successfully.")

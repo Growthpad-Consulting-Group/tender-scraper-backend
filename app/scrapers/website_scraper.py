@@ -3,6 +3,7 @@ from app.scrapers.scraper import scrape_tenders  # Import the function used for 
 from datetime import datetime  # For handling date and time
 from app.services.log import ScrapingLog  # Import your custom logging class
 from app.scrapers.scraper_status import scraping_status  # Import the global scraping status
+import logging
 
 def fetch_urls_and_terms(db_connection):
     """
@@ -47,6 +48,10 @@ def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_ty
 
     try:
         terms = terms or []
+
+        # Log the received search terms for debugging
+        logging.info(f"Scraping function called with terms: {terms}")
+
 
         if not terms:
             ScrapingLog.add_log("Error: No search terms provided.")
