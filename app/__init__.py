@@ -10,8 +10,9 @@ from .services.task_service import task_manager_bp
 from .services.quick_scan import quick_scan_bp
 from .services.query_scan import query_scan_bp
 
-# Import the extensions
+# Initialize the extensions
 jwt = JWTManager()
+socketio = SocketIO(cors_allowed_origins='*')  # Initialize SocketIO instance
 
 def create_app():
     app = Flask(__name__)  # Initialize the app object
@@ -21,9 +22,8 @@ def create_app():
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
 
     # Initialize extensions
-    socketio = SocketIO(app, cors_allowed_origins='*')  # Initialize SocketIO instance
+    jwt.init_app(app)  # Initialize the JWT instance
     socketio.init_app(app)  # Initialize the SocketIO instance
-    jwt.init_app(app)
 
     # Define custom error handlers after initializing JWTManager
     @jwt.unauthorized_loader

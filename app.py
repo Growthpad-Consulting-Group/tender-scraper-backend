@@ -11,27 +11,6 @@ from datetime import timedelta  # Import timedelta for setting expiration times
 # Import custom modules and services
 from app import create_app
 from app.services.scheduler import start_scheduler, shutdown_scheduler
-from app.utils.scraping_progress import run_scraping_with_progress
-
-# Import scraping functions
-from app.scrapers.scraper import scrape_tenders
-from app.scrapers.ungm_tenders import scrape_ungm_tenders
-from app.scrapers.undp_tenders import scrape_undp_tenders
-from app.scrapers.reliefweb_tenders import fetch_reliefweb_tenders
-from app.scrapers.scrape_jobinrwanda_tenders import scrape_jobinrwanda_tenders
-from app.scrapers.scrape_treasury_ke_tenders import scrape_treasury_ke_tenders
-from app.scrapers.website_scraper import scrape_tenders_from_websites
-from app.scrapers.query_scraper import scrape_tenders_from_query
-
-# Import blueprints for routing
-from app.routes.keywords.keyword_routes import keyword_bp
-from app.routes.terms.search_terms import search_terms_bp
-from app.routes.upload.upload_routes import upload_bp
-from app.routes.terms.directory_keywords import directory_keywords_bp
-from app.routes.terms.base_keywords import base_keywords_bp
-from app.routes.countries.countries import countries_bp
-from app.routes.closing_keywords.closing_keywords import closing_keywords_bp
-from app.routes.scraping_log.scraping_log import scraping_log_bp
 
 # Load environment variables from .env file
 load_dotenv()
@@ -49,13 +28,23 @@ app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=60)  # Access tokens expire in 60 minutes
 app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=14)     # Refresh tokens expire in 14 days
 
+# Initialize JWT
 jwt = JWTManager(app)
 
 # Start background scheduler for periodic tasks and register graceful shutdown
 start_scheduler()
 atexit.register(shutdown_scheduler)
 
-# Register application blueprints to handle different routes
+# Import and register application blueprints to handle different routes
+from app.routes.keywords.keyword_routes import keyword_bp
+from app.routes.terms.search_terms import search_terms_bp
+from app.routes.upload.upload_routes import upload_bp
+from app.routes.terms.directory_keywords import directory_keywords_bp
+from app.routes.terms.base_keywords import base_keywords_bp
+from app.routes.countries.countries import countries_bp
+from app.routes.closing_keywords.closing_keywords import closing_keywords_bp
+from app.routes.scraping_log.scraping_log import scraping_log_bp
+
 app.register_blueprint(keyword_bp)
 app.register_blueprint(search_terms_bp)
 app.register_blueprint(upload_bp)
