@@ -20,9 +20,8 @@ def create_app():
     # Load configurations
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
 
-    # Enable CORS (Cross-Origin Resource Sharing)
-    # Allowing only the frontend domain to access the backend API
-    CORS(app, resources={r"/*": {"origins": "https://tender.growthpad.co.ke"}})
+    # Enable CORS (Cross-Origin Resource Sharing) for all domains
+    CORS(app)  # This allows all origins
 
     # Initialize extensions
     socketio.init_app(app)  # Correctly initialize the SocketIO instance
