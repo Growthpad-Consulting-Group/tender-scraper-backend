@@ -1,5 +1,5 @@
 from flask import Flask, jsonify
-from flask_cors import CORS  # Import Flask-CORS
+from flask_cors import CORS  # Import CORS
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
 import os
@@ -11,17 +11,15 @@ from .services.quick_scan import quick_scan_bp
 from .services.query_scan import query_scan_bp
 from .extensions import socketio, jwt  # Import the extensions
 
-# Initialize the app object here globally
+# Initialize the app object
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all origins
 socketio = SocketIO(app, cors_allowed_origins='*')  # Initialize SocketIO instance
 
 def create_app():
     global app  # Use the global app variable
     # Load configurations
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
-
-    # Enable CORS (Cross-Origin Resource Sharing) for all domains
-    CORS(app)  # This allows all origins
 
     # Initialize extensions
     socketio.init_app(app)  # Correctly initialize the SocketIO instance
