@@ -9,20 +9,20 @@ from .routes.tenders import tenders_bp
 from .services.task_service import task_manager_bp
 from .services.quick_scan import quick_scan_bp
 from .services.query_scan import query_scan_bp
-from .extensions import socketio, jwt  # Import the extensions
 
-# Initialize the app object
-app = Flask(__name__)
-CORS(app)  # Enable CORS for all origins
-socketio = SocketIO(app, cors_allowed_origins='*')  # Initialize SocketIO instance
+# Import the extensions
+jwt = JWTManager()
 
 def create_app():
-    global app  # Use the global app variable
+    app = Flask(__name__)  # Initialize the app object
+    CORS(app)  # Enable CORS for all origins
+
     # Load configurations
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
 
     # Initialize extensions
-    socketio.init_app(app)  # Correctly initialize the SocketIO instance
+    socketio = SocketIO(app, cors_allowed_origins='*')  # Initialize SocketIO instance
+    socketio.init_app(app)  # Initialize the SocketIO instance
     jwt.init_app(app)
 
     # Define custom error handlers after initializing JWTManager
@@ -42,4 +42,4 @@ def create_app():
     app.register_blueprint(quick_scan_bp)
     app.register_blueprint(query_scan_bp)
 
-    return app
+    return app, socketio  # Return both app and socketio instances
