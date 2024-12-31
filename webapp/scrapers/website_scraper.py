@@ -82,7 +82,7 @@ def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_ty
             for url in urls
         ]
 
-        ScrapingLog.add_log(f"Google queries: {google_queries}")
+        # ScrapingLog.add_log(f"Google queries: {google_queries}")
 
         total_found_tenders = 0
         total_relevant_tenders = 0
