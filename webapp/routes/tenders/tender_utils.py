@@ -108,7 +108,9 @@ def extract_closing_dates(text: str, db_connection) -> list:
 
     # Join keywords into a regex pattern
     closing_keywords_pattern = r"|".join(map(re.escape, closing_keywords))
-    date_formats = r"(\d{1,2}\s*(AM|PM)?\s*on\s*\d{1,2}\s+\w+\s+\d{4}|\d{1,2}\s*\w+\s*\d{4}|\d{1,2}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{2,4}|\w+\s+\d{1,2},\s+\d{4}|\d{1,2} \w+ \d{4}|\d{1,2}\s+\w+\s+\d{4}|\d{1,2}\s+\w+\s+\d{2})"
+    date_formats = r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s*(?:AM|PM)?\s*on\s*\d{1,2}\s+\w+\s+\d{4}|" \
+                   r"\w+\s+\d{1,2},\s+\d{4}|\d{1,2}\s+\w+\s+\d{4}|\d{1,2}\s+\w+\s+\d{2}|" \
+                   r"\w+\s+\d{1,2}|\d{1,2}\s*[ -]\s*\d{1,2})"
 
     # Construct regex pattern and find matches
     pattern = rf"({closing_keywords_pattern})[\s:]*({date_formats})"
@@ -154,7 +156,9 @@ def parse_closing_date(date: str) -> datetime.date:
     formats = [
         "%d %B %Y", "%d %b %Y", "%d %m %Y", "%d/%m/%Y",
         "%Y-%m-%d", "%B %d, %Y", "%d %B %y", "%d-%m-%Y",
-        "%d %B", "%B %d", "%I:%M %p on %d %B %Y", "%d %B %Y %I:%M %p"
+        "%d %B", "%B %d", "%I:%M %p on %d %B %Y", "%d %B %Y %I:%M %p",
+        "%d-%m-%y", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%m-%d-%y",
+        "%B %d %Y", "%B %d", "%d %b"
     ]
 
     # Try each format to parse the date
