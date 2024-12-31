@@ -492,10 +492,18 @@ def run_task(task_id):
     scraping_function = get_scraping_function(task[2])
     if scraping_function:
         try:
-            logging.info(f"Running task '{task[1]}' with selected region '{selected_region}' and search terms: {search_terms}.")
-            # Call the scraping function with all required parameters
-            scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, region=selected_region, terms=search_terms)
+            logging.info(f"Running task '{task[1]}' with search terms: {search_terms}.")
+
+            # Call the scraping function with the appropriate parameters
+            if scraping_function == scrape_tenders_from_websites:
+                # For websites, exclude the region
+                scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, terms=search_terms)
+            else:
+                # For queries, include the region
+                scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, region=selected_region, terms=search_terms)
+
             logging.info(f"Task '{task[1]}' executed successfully.")
+
         except Exception as e:
             logging.error(f"Error running task '{task[1]}': {str(e)}")
             return jsonify({"msg": f"Error running task: {str(e)}"}), 500
