@@ -31,6 +31,10 @@ USER_AGENTS = [
     'Mozilla/5.0 (iPhone; CPU iPhone OS 10_0 like Mac OS X) AppleWebKit/602.1.50 (KHTML, like Gecko) Version/10.0 Mobile/14E277 Safari/602.1',
 ]
 
+# Exponential backoff configuration
+MAX_RETRIES = 5
+BACKOFF_FACTOR = 2  # Experiment with this to suit your needs
+
 # Mapping of supported search engines
 SEARCH_ENGINES = [
     "Google",
@@ -58,55 +62,60 @@ def scrape_tenders(db_connection, query, search_engines):
         "support.microsoft.com", "about.ads.microsoft.com",
         "aka.ms", "yahoo.com", "search.yahoo.com",
         "duckduckgo.com", "ask.com", "bing.com",
+        "youtube.com",
     ]
 
     total_steps = len(search_engines)  # Count the total search engines for progress calculation
 
     for i, engine in enumerate(search_engines):
-        search_url = construct_search_url(engine, query)  # Construct the search URL
+        search_url = construct_search_url(engine, query)
         ScrapingLog.add_log(f"Constructed Search URL for engine '{engine}': {search_url}")
 
-        headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-        }
+        for attempt in range(MAX_RETRIES):
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+            }
+            time.sleep(random.uniform(3, 10))  # Random delay before each request
 
-        time.sleep(random.uniform(1, 3))  # Add a random delay
+            try:
+                response = requests.get(search_url, headers=headers)
+                response.raise_for_status()
 
-        try:
-            response = requests.get(search_url, headers=headers)
-            response.raise_for_status()  # Raise an error for bad responses
-            soup = BeautifulSoup(response.content, 'html.parser')  # Parse the response content
+                soup = BeautifulSoup(response.content, 'html.parser')
+                links = soup.find_all('a', href=True)
+                for link in links:
+                    href = link['href']
+                    actual_url = extract_actual_link_from_search_result(href, engine)
 
-            links = soup.find_all('a', href=True)
-            for link in links:
-                href = link['href']
-                actual_url = extract_actual_link_from_search_result(href, engine)  # Get the actual URL
+                    if "google.com" in actual_url or any(domain in actual_url for domain in excluded_domains):
+                        continue
 
-                if "google.com" in actual_url or any(domain in actual_url for domain in excluded_domains):
-                    continue
+                    if is_valid_url(actual_url):
+                        ScrapingLog.add_log(f"Visiting URL: {actual_url}")
+                        tender_title = clean_title(link.text.strip())
+                        tender_details = scrape_tender_details(actual_url, tender_title, headers, db_connection)
+                        if tender_details:
+                            tenders.append(tender_details)
 
-                if is_valid_url(actual_url):
-                    ScrapingLog.add_log(f"Visiting URL: {actual_url}")
-                    tender_title = clean_title(link.text.strip())
+                progress = ((i + 1) / total_steps) * 100
+                logging.info(f"Emitting progress: {progress}%")
+                socketio.emit('scraping_progress', {'progress': progress})  # Emit the progress
+                break  # Exit loop if the request is successful
 
-                    # Log the cleaned title before you scrape for details
-                    # ScrapingLog.add_log(f"Clean Title to Scrape: '{tender_title}'")
+            except requests.exceptions.HTTPError as http_err:
+                ScrapingLog.add_log(f'Error scraping {search_url}: {str(http_err)}')
 
-                    tender_details = scrape_tender_details(actual_url, tender_title, headers, db_connection)  # Pass the cleaned title
-                    if tender_details:
-                        tenders.append(tender_details)  # Add the tender details to the list
-
-            progress = ((i + 1) / total_steps) * 100
-            # ScrapingLog.add_log(f'Emitting progress: {progress}%')
-            logging.info(f"Emitting progress: {progress}%")
-            socketio.emit('scraping_progress', {'progress': progress})  # Emit the progress
-
-        except requests.exceptions.HTTPError as http_err:
-            ScrapingLog.add_log(f'Error scraping {search_url}: {str(http_err)}')
-            continue
+                # Handle 429 Too Many Requests
+                if response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                    wait_time = BACKOFF_FACTOR ** attempt  # Exponential backoff
+                    ScrapingLog.add_log(f"429 Too Many Requests. Backing off for {wait_time} seconds.")
+                    time.sleep(wait_time)
+                    continue  # Retry the request
+                else:
+                    break  # Exit the retry loop on non-retriable error
 
     socketio.emit('scraping_complete', {})
-    return tenders  # Return the list of scraped tenders
+    return tenders
 
 def clean_title(title):
     """

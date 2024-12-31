@@ -38,6 +38,9 @@ SEARCH_ENGINES = [
     "DuckDuckGo",
     "Ask"
 ]
+# Exponential backoff configuration
+MAX_RETRIES = 5
+BACKOFF_FACTOR = 2  # Experiment with this to suit your needs
 
 def scrape_tenders(db_connection, query, search_engines):
     """
@@ -69,13 +72,14 @@ def scrape_tenders(db_connection, query, search_engines):
         search_url = construct_search_url(engine, query)  # Construct the search URL
         ScrapingLog.add_log(f"Constructed Search URL for engine '{engine}': {search_url}")
 
-        # Set a random user agent from the list to simulate browser requests
-        headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-        }
+        for attempt in range(MAX_RETRIES):
+            # Set a random user agent from the list to simulate browser requests
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+            }
 
         # Add a random delay before sending the request to avoid rate limiting
-        time.sleep(random.uniform(1, 3))
+        time.sleep(random.uniform(3, 10))
 
         try:
             # Make the HTTP GET request to the constructed search URL
@@ -107,8 +111,16 @@ def scrape_tenders(db_connection, query, search_engines):
 
         except requests.exceptions.HTTPError as http_err:
             ScrapingLog.add_log(f"Error scraping {search_url}: {str(http_err)}")
-            continue  # Continue on errors
 
+            # Handle 429 Too Many Requests
+            if response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                wait_time = BACKOFF_FACTOR ** attempt  # Exponential backoff
+                ScrapingLog.add_log(f"429 Too Many Requests. Backing off for {wait_time} seconds.")
+                time.sleep(wait_time)
+                continue  # Retry the request
+            else:
+                break  # Exit the retry loop on non-retriable error
+                
     # Emit that scraping is complete
     ScrapingLog.add_log(f"Scraping completed. Total tenders found: {len(tenders)}")
     socketio.emit('scraping_complete', { 'total_tenders': len(tenders) })
