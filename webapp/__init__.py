@@ -9,6 +9,7 @@ from .routes.tenders import tenders_bp
 from .services.task_service import task_manager_bp
 from .services.quick_scan import quick_scan_bp
 from .services.query_scan import query_scan_bp
+from .services.keep_alive import keep_alive_bp
 
 # Initialize the extensions
 jwt = JWTManager()
@@ -42,5 +43,6 @@ def create_app():
     app.register_blueprint(task_manager_bp)
     app.register_blueprint(quick_scan_bp)
     app.register_blueprint(query_scan_bp)
+    app.register_blueprint(keep_alive_bp)
 
     return app  # Return only the app instance
