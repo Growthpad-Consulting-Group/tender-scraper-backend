@@ -18,7 +18,7 @@ import urllib.parse  # Import this to parse URLs
 import random  # For generating random delays
 import time  # For adding sleep delays between requests
 import re  # For regular expression operations
-from webapp.extensions import socketio  # Import your SocketIO instance here
+# from webapp.extensions import socketio  # Import your SocketIO instance here
 from webapp.services.log import ScrapingLog  # Import your custom logging class
 
 # List of common user agents to simulate different browsers
@@ -60,85 +60,81 @@ def scrape_tenders(db_connection, query, search_engines):
         "support.microsoft.com", "about.ads.microsoft.com",
         "aka.ms", "yahoo.com", "search.yahoo.com",
         "duckduckgo.com", "ask.com", "bing.com", "youtube.com",
-        "investopedia.com"
+        "investopedia.com", "help.yahoo.com", "google.com",
     ]
+    
 
-    total_steps = len(search_engines)  # Count the total search engines for progress calculation
-
+    # Make sure to capture the total number of search engines for progress reporting
+    total_steps = len(search_engines)
     ScrapingLog.add_log("Starting tender scraping...")
 
-    # Loop through each specified search engine
     for i, engine in enumerate(search_engines):
-        search_url = construct_search_url(engine, query)  # Construct the search URL
+        search_url = construct_search_url(engine, query)
         ScrapingLog.add_log(f"Constructed Search URL for engine '{engine}': {search_url}")
 
         for attempt in range(MAX_RETRIES):
-            # Set a random user agent from the list to simulate browser requests
             headers = {
                 "User-Agent": random.choice(USER_AGENTS),
             }
+            time.sleep(random.uniform(3, 10))
 
-        # Add a random delay before sending the request to avoid rate limiting
-        time.sleep(random.uniform(3, 10))
+            try:
+                response = requests.get(search_url, headers=headers)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
 
-        try:
-            # Make the HTTP GET request to the constructed search URL
-            response = requests.get(search_url, headers=headers)
-            response.raise_for_status()  # Raise an error for bad responses
-            soup = BeautifulSoup(response.content, 'html.parser')  # Parse the response content with BeautifulSoup
+                links = soup.find_all('a', href=True)
+                for link in links:
+                    href = link['href']
 
-            # Extract links from the search results
-            links = soup.find_all('a', href=True)
-            for link in links:
-                href = link['href']
-                actual_url = extract_actual_link_from_search_result(href, engine)  # Get the actual URL from the search result
+                    # Specific handling for Yahoo links
+                    if engine == "Yahoo" and 'url=' in href:
+                        actual_url = re.search(r'url=([^&]+)', href)
+                        if actual_url:
+                            actual_url = urllib.parse.unquote(actual_url.group(1))
+                        else:
+                            ScrapingLog.add_log(f"Skipping invalid URL: {href}")
+                            continue
+                    else:
+                        actual_url = extract_actual_link_from_search_result(href, engine)
 
-                # Skip internal pages and excluded domains
-                if "google.com" in actual_url or any(domain in actual_url for domain in excluded_domains):
+                    # Skip invalid URLs
+                    if not is_valid_url(href):
+                        # ScrapingLog.add_log(f"Skipping invalid URL: {href}")
+                        continue
+
+                    actual_url = extract_actual_link_from_search_result(href, engine)
+
+                    # Check against excluded domains
+                    if actual_url is None or is_excluded_domains(actual_url, excluded_domains):
+                        continue
+
+                    # Check if the actual URL is valid before visiting
+                    if is_valid_url(actual_url):
+                        ScrapingLog.add_log(f"Visiting URL: {actual_url}")
+                        tender_details = scrape_tender_details(actual_url, link.text.strip(), headers, db_connection)
+                        if tender_details:
+                            tenders.append(tender_details)
+
+                # Update progress
+                progress = ((i + 1) / total_steps) * 100
+                ScrapingLog.add_log(f'Emitting progress: {progress}%')
+
+            except requests.exceptions.HTTPError as http_err:
+                ScrapingLog.add_log(f"Error scraping {search_url}: {str(http_err)}")
+                if response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                    wait_time = BACKOFF_FACTOR ** attempt
+                    ScrapingLog.add_log(f"429 Too Many Requests. Backing off for {wait_time} seconds.")
+                    time.sleep(wait_time)
                     continue
+                else:
+                    break
 
-                # Check if the extracted URL is valid before scraping
-                if is_valid_url(actual_url):
-                    ScrapingLog.add_log(f"Visiting URL: {actual_url}")  # Log to ScrapingLog
-                tender_details = scrape_tender_details(actual_url, link.text.strip(), headers, db_connection)  # Pass the title
-                if tender_details:
-                    tenders.append(tender_details)  # Add the tender details to the list
-
-            # Emit progress update after processing an engine's results
-            progress = ((i + 1) / total_steps) * 100
-            ScrapingLog.add_log(f'Emitting progress: {progress}%')
-            socketio.emit('scraping_progress', {'progress': progress})  # Emit the progress
-
-        except requests.exceptions.HTTPError as http_err:
-            ScrapingLog.add_log(f"Error scraping {search_url}: {str(http_err)}")
-
-            # Handle 429 Too Many Requests
-            if response.status_code == 429 and attempt < MAX_RETRIES - 1:
-                wait_time = BACKOFF_FACTOR ** attempt  # Exponential backoff
-                ScrapingLog.add_log(f"429 Too Many Requests. Backing off for {wait_time} seconds.")
-                time.sleep(wait_time)
-                continue  # Retry the request
-            else:
-                break  # Exit the retry loop on non-retriable error
-                
-    # Emit that scraping is complete
     ScrapingLog.add_log(f"Scraping completed. Total tenders found: {len(tenders)}")
-    socketio.emit('scraping_complete', { 'total_tenders': len(tenders) })
-    return tenders  # Return the list of scraped tenders
+    return tenders
 
 def extract_actual_link_from_search_result(href, engine):
-    """
-    Extracts the actual link from the search engine results based on the search engine.
-
-    Args:
-        href (str): The href attribute from the search result anchor tag.
-        engine (str): The name of the search engine.
-
-    Returns:
-        str: The extracted actual URL.
-    """
     if engine in ['Google', 'Bing', 'Yahoo', 'DuckDuckGo', 'Ask']:
-        # Handle relative URLs
         if href.startswith('/'):
             base_url = {
                 "Google": "https://www.google.com",
@@ -148,30 +144,30 @@ def extract_actual_link_from_search_result(href, engine):
                 "Ask": "https://www.ask.com"
             }[engine]
             return urllib.parse.urljoin(base_url, href)
-
-        # Decode the URL in the search result
-        match = re.search(r'q=([^&]+)', href)  # Get everything after 'q='
+        match = re.search(r'q=([^&]+)', href)
         if match:
-            return urllib.parse.unquote(match.group(1))  # Decode the URL
-
-    return href  # Fallback to returning original href if no match
-
-
-
+            return urllib.parse.unquote(match.group(1))
+    return href
 
 def is_valid_url(url):
-    """
-    Check if the URL is valid and begins with http or https.
-
-    Args:
-        url (str): The URL to validate.
-
-    Returns:
-        bool: True if valid, False otherwise.
-    """
-    # Check if the URL is valid and starts with 'http://' or 'https://'
     return url.startswith('http://') or url.startswith('https://')
 
+def is_excluded_domains(url, excluded_domains):
+    """
+    Checks if the given URL belongs to any of the excluded domains.
+
+    Args:
+        url (str): The URL to check.
+        excluded_domains (list): List of domains to exclude.
+
+    Returns:
+        bool: True if the URL is from an excluded domain, False otherwise.
+    """
+    parsed_url = urlparse(url)  # Parse the URL
+    domain = parsed_url.netloc.lower()  # Get the domain in lowercase
+
+    # Check if the domain is in the list of excluded domains
+    return any(excluded_domain in domain for excluded_domain in excluded_domains)
 
 def log_scraping_details(db_connection, website_name, visiting_url, tenders_found,
                          tender_title, closing_date, closing_keyword,

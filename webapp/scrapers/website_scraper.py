@@ -82,7 +82,70 @@ def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_ty
             for url in urls
         ]
 
-        # ScrapingLog.add_log(f"Google queries: {google_queries}")
+        # Construct queries for Bing
+        bing_queries = [
+            " OR ".join([f'"{term}"' for term in terms]) +
+            (f" {current_year}" if time_frame == 'y' else '') +
+            (f"&qft=+filterui:date:y" if time_frame == 'y' else '') +
+            (f"&filter=all" if file_type and file_type != 'any' else '') +  # Add appropriate file type filter
+            (f"site:{region} " if region and region != 'any' else '')  # Region-based filter if needed
+        ]
+
+        # Construct queries for Yahoo (similar to Bing)
+        yahoo_queries = bing_queries  # For simplicity, assuming Yahoo uses similar queries as Bing
+
+        # Construct queries for DuckDuckGo
+        duckduckgo_queries = [
+            " OR ".join([f'"{term}"' for term in terms]) +
+            (f" {current_year}" if time_frame == 'y' else '') +
+            (f"&t=hg" if file_type and file_type != 'any' else '') +  # Potential file type filtering
+            (f"site:{region} " if region and region != 'any' else '')  # Use site filter for regional search
+        ]
+
+        # Construct queries for Ask.com
+        ask_queries = [
+            " OR ".join([f'"{term}"' for term in terms]) +
+            (f" {current_year}" if time_frame == 'y' else '') +
+            (f"&filetype={file_type}" if file_type and file_type != 'any' else '') +  # File type
+            (f"site:{region}" if region and region != 'any' else '')  # Regional search
+        ]
+
+
+        # Initialize lists for storing all scraped tenders and counting found tenders
+        all_tenders = []
+        total_found_tenders = 0
+        ScrapingLog.clear_logs()  # Clear logs before starting
+
+        ScrapingLog.add_log("Starting the scraping process.")
+
+        # Select the appropriate queries based on selected engines
+        all_queries = []
+        if 'Google' in selected_engines:
+            all_queries.extend(google_queries)
+        if 'Bing' in selected_engines:
+            all_queries.extend(bing_queries)
+        if 'Yahoo' in selected_engines:
+            all_queries.extend(yahoo_queries)
+        if 'DuckDuckGo' in selected_engines:
+            all_queries.extend(duckduckgo_queries)
+        if 'Ask' in selected_engines:
+            all_queries.extend(ask_queries)
+
+            # Choose queries based on selected engines
+        for query in all_queries:
+            ScrapingLog.add_log(f"Scraping for query: {query}")  # Log the current query being scraped
+            # Call the scraping function and collect the returned tenders
+            scraped_tenders = scrape_tenders(db_connection, query, selected_engines)
+
+            # Count the total number of tenders found after scraping each query
+            if scraped_tenders is not None:  # Check for None response
+                total_found_tenders += len(scraped_tenders)
+                all_tenders.extend(scraped_tenders)
+
+        ScrapingLog.add_log(f"Scraping completed. Total tenders found: {total_found_tenders}")  # Log to ScrapingLog
+
+        # Update scraping status to complete
+        scraping_status['complete'] = True
 
         total_found_tenders = 0
         total_relevant_tenders = 0
@@ -90,7 +153,7 @@ def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_ty
         total_open_tenders = 0
         total_closed_tenders = 0
 
-        for query in google_queries:
+        for query in all_queries:
             ScrapingLog.add_log(f"Scraping for query: {query}")
 
             try:
@@ -117,12 +180,12 @@ def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_ty
             except Exception as e:
                 ScrapingLog.add_log(f"Error scraping for query {query}: {e}")
 
-        # Log counts after processing all queries
-        ScrapingLog.add_log(f"Scraping completed. Total tenders found: {total_found_tenders}, "
-                            f"Relevant: {total_relevant_tenders}, "
-                            f"Irrelevant: {total_irrelevant_tenders}, "
-                            f"Open: {total_open_tenders}, "
-                            f"Closed: {total_closed_tenders}")
+                # Log counts after processing all queries
+                ScrapingLog.add_log(f"Scraping completed. Total tenders found: {total_found_tenders}, "
+                                    f"Relevant: {total_relevant_tenders}, "
+                                    f"Irrelevant: {total_irrelevant_tenders}, "
+                                    f"Open: {total_open_tenders}, "
+                                    f"Closed: {total_closed_tenders}")
 
         scraping_status.update({
             'complete': True,
@@ -134,11 +197,12 @@ def scrape_tenders_from_websites(selected_engines=None, time_frame=None, file_ty
         })
 
     except Exception as e:
-        ScrapingLog.add_log(f"An error occurred while scraping: {e}")
+        ScrapingLog.add_log(f"An error occurred while scraping: {e}")  # Log the error
 
     finally:
         if db_connection is not None:
             db_connection.close()  # Ensure the database connection is closed
+            ScrapingLog.add_log("Database connection closed.")  # Log closing database connection
 
 # Entry point of the script when executed directly
 if __name__ == "__main__":

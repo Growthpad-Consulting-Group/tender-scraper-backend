@@ -43,73 +43,72 @@ def scrape_tenders_from_query(selected_engines=None, time_frame=None, file_type=
     global scraping_status  # Access the global variable to update scraping status
 
     try:
-            # Fetch terms passed directly
+        # Fetch terms passed directly
         if terms is None or not terms:
-            terms = []  # Handles any null/empty lists
-        # terms = terms if terms is not None else fetch_terms(db_connection)  # Try to fetch terms if none passed.
+            terms = []
 
         if not terms:
             ScrapingLog.add_log("Error: No search terms provided.")
-            return  # Exit early if no terms to search with
+            return
 
-        # Establish database connection
         db_connection = get_db_connection()
-
-        # Fetch search terms from the database
         search_terms = fetch_terms(db_connection)
 
-        if not search_terms:  # Check if search terms are not empty
+        if not search_terms:
             ScrapingLog.add_log("No valid search terms found. Aborting scraping.")
             return
 
         # Get the current year for the query
         current_year = datetime.now().year
 
-        # Construct queries for scraping with search terms and region.
+        # Construct queries for scraping with search terms and region
         google_queries = [
-            " OR ".join([f'"{term}"' for term in terms]) +  # Add quotes around each term
-            (f" {current_year}" if time_frame == 'y' else '') +  # Add the year only if the past year is selected
-            (f"&as_qdr={time_frame}" if time_frame != 'anytime' else '') +  # Apply qdr filter only if time_frame is not 'anytime'
-            f"&as_eq=&as_nlo=&as_nhi=&lr=&" +  # Various empty filters (as_eq = exact match, etc.)
-            (f"cr=country{region}&" if region and region != 'any' else '') +  # Country filter (e.g., countryKE)
-            (f"as_filetype={file_type}&" if file_type and file_type != 'any' else "") +  # Add filetype filter if not 'any'
-            f"as_occt=any&" +  # Correct placement of any file type filter if added
-            f"tbs="  # Optional for additional filters; not necessary in this case
+            " OR ".join([f'"{term}"' for term in terms]) +
+            (f" {current_year}" if time_frame == 'y' else '') +
+            (f"&as_qdr={time_frame}" if time_frame != 'anytime' else '') +
+            f"&as_eq=&as_nlo=&as_nhi=&lr=&" +
+            (f"cr=country{region}&" if region and region != 'any' else '') +
+            (f"as_filetype={file_type}&" if file_type and file_type != 'any' else "") +
+            "as_occt=any&"
         ]
 
-            # Construct queries for Bing
+        # Construct queries for Bing
         bing_queries = [
             " OR ".join([f'"{term}"' for term in terms]) +
             (f" {current_year}" if time_frame == 'y' else '') +
             (f"&qft=+filterui:date:y" if time_frame == 'y' else '') +
-            (f"&filter=all" if file_type and file_type != 'any' else '') +  # Add appropriate file type filter
-            (f"site:{region} " if region and region != 'any' else '')  # Region-based filter if needed
+            (f"&filter=all" if file_type and file_type != 'any' else '') +
+            (f" site:{region}" if region and region != 'any' else '')  # Add space before site:{region}
         ]
 
+
         # Construct queries for Yahoo (similar to Bing)
-        yahoo_queries = bing_queries  # For simplicity, assuming Yahoo uses similar queries as Bing
+        yahoo_queries = bing_queries
 
         # Construct queries for DuckDuckGo
         duckduckgo_queries = [
             " OR ".join([f'"{term}"' for term in terms]) +
             (f" {current_year}" if time_frame == 'y' else '') +
-            (f"&t=hg" if file_type and file_type != 'any' else '') +  # Potential file type filtering
-            (f"site:{region} " if region and region != 'any' else '')  # Use site filter for regional search
+            (f"&t=hg" if file_type and file_type != 'any' else '') +
+            (f"site:{region} " if region and region != 'any' else '')
         ]
 
         # Construct queries for Ask.com
         ask_queries = [
             " OR ".join([f'"{term}"' for term in terms]) +
             (f" {current_year}" if time_frame == 'y' else '') +
-            (f"&filetype={file_type}" if file_type and file_type != 'any' else '') +  # File type
-            (f"site:{region}" if region and region != 'any' else '')  # Regional search
+            (f"&filetype={file_type}" if file_type and file_type != 'any' else '') +
+            (f"site:{region}" if region and region != 'any' else '')
         ]
 
-
-    # Initialize lists for storing all scraped tenders and counting found tenders
+        # Initialize counters and logs
         all_tenders = []
         total_found_tenders = 0
-        ScrapingLog.clear_logs()  # Clear logs before starting
+        total_relevant_tenders = 0
+        total_irrelevant_tenders = 0
+        total_open_tenders = 0
+        total_closed_tenders = 0
+        ScrapingLog.clear_logs()
 
         ScrapingLog.add_log("Starting the scraping process.")
 
@@ -124,32 +123,59 @@ def scrape_tenders_from_query(selected_engines=None, time_frame=None, file_type=
         if 'DuckDuckGo' in selected_engines:
             all_queries.extend(duckduckgo_queries)
         if 'Ask' in selected_engines:
-            all_queries.extend(ask_queries)    
+            all_queries.extend(ask_queries)
 
-        # Choose queries based on selected engines
+            # Perform scraping for each query
         for query in all_queries:
-            ScrapingLog.add_log(f"Scraping for query: {query}")  # Log the current query being scraped
-            # Call the scraping function and collect the returned tenders
-            scraped_tenders = scrape_tenders(db_connection, query, selected_engines)
+            ScrapingLog.add_log(f"Scraping for query: {query}")
+            try:
+                scraped_tenders = scrape_tenders(db_connection, query, selected_engines)
 
-            # Count the total number of tenders found after scraping each query
-            if scraped_tenders is not None:  # Check for None response
-                total_found_tenders += len(scraped_tenders)
-                all_tenders.extend(scraped_tenders)
+                if scraped_tenders is not None:
+                    total_found_tenders += len(scraped_tenders)
+                    for tender in scraped_tenders:
+                        scraping_status['tenders'].append(tender)
+                        is_relevant = tender.get('is_relevant', 'No')
+                        status = tender.get('status', 'unknown')
 
-        ScrapingLog.add_log(f"Scraping completed. Total tenders found: {total_found_tenders}")  # Log to ScrapingLog
+                        if is_relevant == "Yes":
+                            total_relevant_tenders += 1
+                        else:
+                            total_irrelevant_tenders += 1
 
-        # Update scraping status to complete
-        scraping_status['complete'] = True
+                        if status == "open":
+                            total_open_tenders += 1
+                        elif status == "closed":
+                            total_closed_tenders += 1
+
+            except Exception as e:
+                ScrapingLog.add_log(f"Error scraping for query {query}: {e}")
+
+        # Log results after processing all queries
+        ScrapingLog.add_log(f"Scraping completed. Total tenders found: {total_found_tenders}, "
+                            f"Relevant: {total_relevant_tenders}, "
+                            f"Irrelevant: {total_irrelevant_tenders}, "
+                            f"Open: {total_open_tenders}, "
+                            f"Closed: {total_closed_tenders}")
+
+        # Update scraping status
+        scraping_status.update({
+            'complete': True,
+            'total_found': total_found_tenders,
+            'relevant_count': total_relevant_tenders,
+            'irrelevant_count': total_irrelevant_tenders,
+            'open_count': total_open_tenders,
+            'closed_count': total_closed_tenders
+        })
 
     except Exception as e:
-        ScrapingLog.add_log(f"An error occurred while scraping: {e}")  # Log the error
+        ScrapingLog.add_log(f"An error occurred while scraping: {e}")
 
     finally:
         if db_connection is not None:
-            db_connection.close()  # Ensure the database connection is closed
-            ScrapingLog.add_log("Database connection closed.")  # Log closing database connection
+            db_connection.close()
+            ScrapingLog.add_log("Database connection closed.")
 
-# Entry point of the script when executed directly
+# Execution entry point
 if __name__ == "__main__":
     scrape_tenders_from_query()
