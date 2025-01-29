@@ -7,6 +7,7 @@ from dateutil import parser
 from webapp.services.scheduler import scheduler
 from webapp.scrapers.ungm_tenders import scrape_ungm_tenders
 from webapp.scrapers.undp_tenders import scrape_undp_tenders
+from webapp.scrapers.ppip_tenders import scrape_ppip_tenders
 from webapp.scrapers.reliefweb_tenders import fetch_reliefweb_tenders
 from webapp.scrapers.scrape_jobinrwanda_tenders import scrape_jobinrwanda_tenders
 from webapp.scrapers.scrape_treasury_ke_tenders import scrape_treasury_ke_tenders
@@ -221,6 +222,7 @@ def get_scraping_function(tender_type):
         'Job in Rwanda': scrape_jobinrwanda_tenders,
         'Kenya Treasury': scrape_treasury_ke_tenders,
         'UNDP': scrape_undp_tenders,
+        'PPIP': scrape_ppip_tenders,
         'Website Tenders': scrape_tenders_from_websites,
         'Query Tenders': scrape_tenders_from_query
     }
@@ -495,12 +497,18 @@ def run_task(task_id):
             logging.info(f"Running task '{task[1]}' with search terms: {search_terms}.")
 
             # Call the scraping function with the appropriate parameters
-            if scraping_function == scrape_tenders_from_websites:
-                # For websites, exclude the region
-                scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, terms=search_terms)
+            if scraping_function in [scrape_ungm_tenders, fetch_reliefweb_tenders, scrape_jobinrwanda_tenders,
+                                     scrape_treasury_ke_tenders, scrape_undp_tenders, scrape_ppip_tenders]:
+                # These functions can run without specific parameters
+                scraping_function()
             else:
-                # For queries, include the region
-                scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, region=selected_region, terms=search_terms)
+                # For other functions, pass the required parameters
+                if scraping_function == scrape_tenders_from_websites:
+                    # For websites, exclude the region
+                    scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, terms=search_terms)
+                else:
+                    # For queries, include the region
+                    scraping_function(selected_engines=selected_engines, time_frame=time_frame, file_type=file_type, region=selected_region, terms=search_terms)
 
             logging.info(f"Task '{task[1]}' executed successfully.")
 

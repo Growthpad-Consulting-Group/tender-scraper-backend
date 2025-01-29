@@ -6,6 +6,7 @@ from flask_jwt_extended import jwt_required
 from webapp.scrapers.scraper import scrape_tenders
 from webapp.scrapers.ungm_tenders import scrape_ungm_tenders
 from webapp.scrapers.undp_tenders import scrape_undp_tenders
+from webapp.scrapers.ppip_tenders import scrape_ppip_tenders
 from webapp.scrapers.reliefweb_tenders import fetch_reliefweb_tenders
 from webapp.scrapers.scrape_jobinrwanda_tenders import scrape_jobinrwanda_tenders
 from webapp.scrapers.scrape_treasury_ke_tenders import scrape_treasury_ke_tenders
@@ -18,6 +19,7 @@ def run_scraping_with_progress(socketio, tender_types):
         'Job in Rwanda': scrape_jobinrwanda_tenders,
         'Kenya Treasury': scrape_treasury_ke_tenders,
         'UNDP': scrape_undp_tenders,
+        'PPIP': scrape_ppip_tenders,
         'Website Tenders': scrape_tenders_from_websites,
         'General Tenders': scrape_tenders,
     }

@@ -1,10 +1,11 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 import logging
-from datetime import datetime  # Ensure this import exists
+from datetime import datetime
 from webapp.config import get_db_connection
 from webapp.scrapers.ungm_tenders import scrape_ungm_tenders
 from webapp.scrapers.undp_tenders import scrape_undp_tenders
+from webapp.scrapers.ppip_tenders import scrape_ppip_tenders
 from webapp.scrapers.reliefweb_tenders import fetch_reliefweb_tenders
 from webapp.scrapers.scrape_jobinrwanda_tenders import scrape_jobinrwanda_tenders
 from webapp.scrapers.scrape_treasury_ke_tenders import scrape_treasury_ke_tenders
@@ -28,6 +29,7 @@ def get_scraping_function(tender_type):
         'Job in Rwanda': scrape_jobinrwanda_tenders,
         'Kenya Treasury': scrape_treasury_ke_tenders,
         'UNDP': scrape_undp_tenders,
+        'PPIP': scrape_ppip_tenders,
         'Website Tenders': scrape_tenders_from_websites,
         'Query Tenders': scrape_tenders_from_query
     }
@@ -49,35 +51,31 @@ def load_scheduled_tasks():
         for task in tasks:
             task_id, user_id, frequency, start_time, tender_type = task
 
-            # Fetch search terms for the current task
-            cur.execute("SELECT term FROM task_search_terms WHERE task_id = %s", (task_id,))
-            search_terms = [row[0] for row in cur.fetchall()]
+            # Fetch search terms for the current task only if necessary
+            scraping_function = get_scraping_function(tender_type)
+            if scraping_function in [scrape_ungm_tenders, fetch_reliefweb_tenders, scrape_jobinrwanda_tenders,
+                                     scrape_treasury_ke_tenders, scrape_undp_tenders, scrape_ppip_tenders]:
+                search_terms = []  # No search terms needed
+            else:
+                cur.execute("SELECT term FROM task_search_terms WHERE task_id = %s", (task_id,))
+                search_terms = [row[0] for row in cur.fetchall()]
 
             logging.info(f"Fetched search terms for task_id {task_id}: {search_terms}")
 
-            if not search_terms:
-                logging.warning(f'No search terms found for task_id {task_id}; skipping this task.')
-                continue
-
-            scraping_function = get_scraping_function(tender_type)
-
-            if scraping_function:
-                current_time = datetime.now()
-                if current_time < start_time:
-                    logging.info(f"Delaying scheduling of task ID {task_id} until {start_time}.")
-                    delay = (start_time - current_time).total_seconds()
-                    scheduler.add_job(schedule_task_scrape, 'date', run_date=start_time, args=[user_id, task_id, scraping_function, frequency, search_terms])
-                else:
-                    schedule_task_scrape(user_id, task_id, scraping_function, frequency, search_terms)
+            # Schedule the job without skipping for required functions
+            current_time = datetime.now()
+            if current_time < start_time:
+                logging.info(f"Delaying scheduling of task ID {task_id} until {start_time}.")
+                delay = (start_time - current_time).total_seconds()
+                scheduler.add_job(schedule_task_scrape, 'date', run_date=start_time, args=[user_id, task_id, scraping_function, frequency, search_terms])
             else:
-                logging.warning(f"No scraping function found for tender type: {tender_type}")
+                schedule_task_scrape(user_id, task_id, scraping_function, frequency, search_terms)
 
     except Exception as e:
         logging.error(f"Error loading scheduled tasks: {str(e)}")
     finally:
         cur.close()
         conn.close()
-
 
 def schedule_task_scrape(user_id, task_id, job_function, frequency, search_terms):
     job_id = f"user_{user_id}_task_{task_id}"
@@ -86,10 +84,6 @@ def schedule_task_scrape(user_id, task_id, job_function, frequency, search_terms
     existing_job = scheduler.get_job(job_id)
     if existing_job:
         scheduler.remove_job(job_id)
-
-    if not search_terms:
-        logging.warning(f'Cannot schedule job {job_id}; no search terms provided.')
-        return
 
     # Schedule job based on their frequency
     trigger = 'interval'
@@ -102,13 +96,16 @@ def schedule_task_scrape(user_id, task_id, job_function, frequency, search_terms
         'Monthly': {'days': 30}
     }
 
-    # Prepare the job wrapper with search terms check
+    # Prepare the job wrapper
     def job_wrapper():
-        if not search_terms:
-            logging.error(f"Job {job_id} has no search terms; cannot execute.")
-            return
         logging.info(f"Executing job for task ID {task_id} with search terms: {search_terms}")
-        job_function(selected_engines=None, time_frame=None, file_type=None, terms=search_terms)
+
+        # If the scraping function does not require terms
+        if job_function in [scrape_ungm_tenders, fetch_reliefweb_tenders, scrape_jobinrwanda_tenders,
+                            scrape_treasury_ke_tenders, scrape_undp_tenders, scrape_ppip_tenders]:
+            job_function()  # No parameters
+        else:
+            job_function(selected_engines=None, time_frame=None, file_type=None, terms=search_terms)
 
     # Schedule the job based on the frequency
     if frequency in trigger_args:
