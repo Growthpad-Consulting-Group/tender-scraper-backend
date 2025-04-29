@@ -136,31 +136,28 @@ def get_scraping_tasks():
     cache_key = f"scraping_tasks:user:{current_user}"
     cached_tasks = get_cache(cache_key)
     if cached_tasks is not None:
+        logger.info(f"Cache hit: Returning cached tasks for user_id: {current_user}")
         return jsonify({"tasks": cached_tasks}), 200
 
     try:
-        # Use g.conn and g.cur instead of passing them
-        g.cur.execute("""
-            SELECT task_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, last_run, 
-                   email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled, custom_emails, 
-                   search_terms, engines
-            FROM scheduled_tasks
-            WHERE user_id = %s
-        """, (current_user,))
-
-        tasks = g.cur.fetchall()
-        logger.info(f"Fetched tasks from DB: {tasks}")
-        task_list = []
-        for task in tasks:
-            logger.info(f"Processing task {task[0]}: frequency={task[2]}, start_time={task[3]}, is_enabled={task[6]}")
-            task_dict = format_task_response(task)
-            task_list.append(task_dict)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT task_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, last_run, 
+                           email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled, custom_emails, 
+                           search_terms, engines
+                    FROM scheduled_tasks
+                    WHERE user_id = %s
+                """, (current_user,))
+                tasks = cur.fetchall()
+                task_list = [format_task_response(task) for task in tasks]
 
         set_cache(cache_key, task_list, expiry=300)
+        logger.info(f"Successfully fetched and cached {len(task_list)} tasks for user_id: {current_user}")
         return jsonify({"tasks": task_list}), 200
     except Exception as e:
-        logger.error(f"Error fetching tasks: {str(e)}")
-        return jsonify({"msg": "Error fetching tasks."}), 500
+        logger.error(f"Error fetching tasks for user_id {current_user}: {str(e)}")
+        return jsonify({"msg": "Error fetching tasks.", "error": str(e)}), 500
 
 @task_service_bp.route('/api/scraping-tasks', methods=['POST'])
 @jwt_required()
@@ -191,7 +188,7 @@ def create_scraping_task():
         if isinstance(custom_emails, list):
             custom_emails = ','.join([email.strip() for email in custom_emails if email.strip()])
         elif not isinstance(custom_emails, str):
-            custom_emails = ''  # Fallback to empty string if invalid type
+            custom_emails = ''
 
         # Validate emails if custom_emails is non-empty
         email_list = []
@@ -202,60 +199,29 @@ def create_scraping_task():
             if invalid_emails:
                 return jsonify({"msg": f"Invalid email addresses: {', '.join(invalid_emails)}"}), 400
 
-        # Execute the query
-        logger.debug("Executing database insert query")
-        g.cur.execute("""
-            INSERT INTO scheduled_tasks (
-                user_id, name, frequency, start_time, end_time, priority, tender_type,
-                email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled,
-                custom_emails, search_terms, engines
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING task_id, name, frequency, start_time, end_time, priority, tender_type,
-                     email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled,
-                     custom_emails, search_terms, engines
-        """, (
-            current_user, task_name, frequency, start_time, end_time, priority, tender_type,
-            email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled,
-            custom_emails, search_terms, engines
-        ))
-        
-        task = g.cur.fetchone()
-        logger.debug(f"Database returned: {task}")
-        
-        g.conn.commit()
-        
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO scheduled_tasks (
+                        user_id, name, frequency, start_time, end_time, priority, tender_type,
+                        email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled,
+                        custom_emails, search_terms, engines
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING task_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, last_run,
+                             email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled,
+                             custom_emails, search_terms, engines
+                """, (
+                    current_user, task_name, frequency, start_time, end_time, priority, tender_type,
+                    email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled,
+                    custom_emails, search_terms, engines
+                ))
+                task = cur.fetchone()
+                conn.commit()
+
         if task is None:
             logger.error("Database query returned no results")
             return jsonify({"msg": "Failed to create task. Database returned no results."}), 500
-            
-        task_response = {
-            "task_id": task[0],
-            "name": task[1],
-            "frequency": task[2],
-            "start_time": task[3],
-            "end_time": task[4],
-            "priority": task[5],
-            "tender_type": task[6],
-            "email_notifications_enabled": task[7],
-            "sms_notifications_enabled": task[8],
-            "slack_notifications_enabled": task[9],
-            "custom_emails": task[10],
-            "search_terms": task[11],
-            "engines": task[12],
-        }
-        
-        cache_key = f"scraping_tasks:user:{current_user}"
-        delete_cache(cache_key)
-        
-        return jsonify({
-            "msg": "Task added successfully.",
-            "task": task_response
-        }), 201
-    except Exception as e:
-        logger.error(f"Error creating task: {str(e)}")
-        return jsonify({"msg": f"Error creating task: {str(e)}"}), 500
-
 
         task_response = format_task_response(task)
 
@@ -267,47 +233,41 @@ def create_scraping_task():
             "msg": "Task added successfully.",
             "task": task_response
         }), 201
-
     except Exception as e:
         logger.error(f"Error creating task: {str(e)}")
-        return jsonify({"msg": "Error creating task."}), 500
-    
-    
+        return jsonify({"msg": f"Error creating task: {str(e)}"}), 500
+
 @task_service_bp.route('/api/tasks', methods=['GET'], endpoint='get_tasks')
 @jwt_required()
 def get_tasks():
-    """
-    Fetch all scraping tasks for the authenticated user.
-    
-    Returns:
-        JSON response with the list of tasks.
-    """
     current_user = get_jwt_identity()
     logger.info(f"Fetching tasks for user_id: {current_user}")
 
     cache_key = f"scraping_tasks:user:{current_user}"
     cached_tasks = get_cache(cache_key)
     if cached_tasks is not None:
+        logger.info(f"Cache hit: Returning cached tasks for user_id: {current_user}")
         return jsonify({"tasks": cached_tasks}), 200
 
     try:
-        g.cur.execute("""
-            SELECT task_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, last_run, 
-                   email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled, custom_emails, 
-                   search_terms, engines
-            FROM scheduled_tasks
-            WHERE user_id = %s
-        """, (current_user,))
-
-        tasks = g.cur.fetchall()
-        logger.info(f"Fetched tasks from DB: {tasks}")
-        task_list = [format_task_response(task) for task in tasks]
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT task_id, name, frequency, start_time, end_time, priority, is_enabled, tender_type, last_run, 
+                           email_notifications_enabled, sms_notifications_enabled, slack_notifications_enabled, custom_emails, 
+                           search_terms, engines
+                    FROM scheduled_tasks
+                    WHERE user_id = %s
+                """, (current_user,))
+                tasks = cur.fetchall()
+                task_list = [format_task_response(task) for task in tasks]
 
         set_cache(cache_key, task_list, expiry=300)
+        logger.info(f"Successfully fetched and cached {len(task_list)} tasks for user_id: {current_user}")
         return jsonify({"tasks": task_list}), 200
     except Exception as e:
         logger.error(f"Error fetching tasks: {str(e)}")
-        return jsonify({"msg": "Error fetching tasks."}), 500
+        return jsonify({"msg": "Error fetching tasks.", "error": str(e)}), 500
 
 @task_service_bp.route('/api/tasks', methods=['POST'], endpoint='create_task')
 @jwt_required()

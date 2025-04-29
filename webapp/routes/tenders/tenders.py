@@ -1,3 +1,4 @@
+# webapp/routes/tenders/tenders.py
 import os
 import re
 from flask import Blueprint, request, jsonify
@@ -12,6 +13,7 @@ from webapp.scrapers.constants import SEARCH_ENGINES
 from webapp.extensions import socketio
 from webapp.task_service.utils import set_task_state, get_task_state, delete_task_state
 from dotenv import load_dotenv
+
 
 tenders_bp = Blueprint('tenders', __name__)
 
@@ -119,6 +121,7 @@ def run_tender_query():
                     }
                 })
                 set_task_state(task_id, task_state)
+                # logger.debug(f"Task state updated: {task_state}")
 
                 # Log final counts
                 logger.info(f"Scraping completed for query: {query}, found {total_tenders} tenders, Open: {open_tenders_count}, Expired: {closed_tenders_count}")
@@ -226,11 +229,10 @@ def get_tenders():
                     max_budget = request.args.get('max_budget', type=float)
                     start_date = request.args.get('startDate')
                     end_date = request.args.get('endDate')
-                    status = request.args.get('status', '')  # New status filter
 
                     # Create a cache key based on query parameters
                     current_user = get_jwt_identity()
-                    cache_key = f"tenders:user:{current_user}:query:{query}:location:{location}:min_budget:{min_budget or ''}:max_budget:{max_budget or ''}:start_date:{start_date or ''}:end_date:{end_date or ''}:status:{status}"
+                    cache_key = f"tenders:user:{current_user}:query:{query}:location:{location}:min_budget:{min_budget or ''}:max_budget:{max_budget or ''}:start_date:{start_date or ''}:end_date:{end_date or ''}"
                     cached_tenders = get_cache(cache_key)
                     if cached_tenders is not None:
                         logger.info(f"Cache hit: Returning cached tenders for user: {current_user}")
@@ -239,13 +241,11 @@ def get_tenders():
                     sql = """
                         SELECT id, title, description, closing_date, status, source_url, format, tender_type, scraped_at, location
                         FROM tenders
-                        WHERE (title ILIKE %s OR description ILIKE %s)
+                        WHERE status = 'open'
+                        AND (title ILIKE %s OR description ILIKE %s)
                     """
                     params = [f'%{query}%', f'%{query}%']
 
-                    if status:
-                        sql += " AND status ILIKE %s"
-                        params.append(status)
                     if location:
                         sql += " AND location ILIKE %s"
                         params.append(f'%{location}%')
@@ -269,7 +269,7 @@ def get_tenders():
                             "title": t[1],
                             "description": t[2] or "No description",
                             "closing_date": t[3].isoformat(),
-                            "status": t[4],  # Avoid capitalizing to preserve database value
+                            "status": t[4].capitalize(),
                             "source_url": t[5],
                             "format": t[6],
                             "tender_type": t[7],
@@ -308,7 +308,7 @@ def get_tender_by_id(tender_id):
                     "title": tender[1],
                     "description": tender[2] or "No description",
                     "closing_date": tender[3].isoformat(),
-                    "status": tender[4],  # Avoid capitalizing
+                    "status": tender[4].capitalize(),
                     "source_url": tender[5],
                     "format": tender[6],
                     "tender_type": tender[7],
@@ -382,3 +382,5 @@ def get_tender_counts():
     except Exception as e:
         logger.error(f"Error fetching tender counts: {str(e)}")
         return jsonify({"error": "Failed to fetch tender counts"}), 500
+    
+    
