@@ -19,6 +19,7 @@ dist/
 
 # Environment variables file
 .env
+.env.production
 
 # Logs
 *.log
