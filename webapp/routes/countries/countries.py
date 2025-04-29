@@ -31,11 +31,11 @@ def get_countries():
                 current_app.logger.debug("No countries found in the database.")
                 return jsonify([]), 200  # Return an empty list if no countries are found
 
-            # Adjust mapping to account for lists instead of tuples
+            # Correct mapping based on table structure: (id, country_name, iso_code)
             countries_list = [
-                {"country_name": country[0], "iso_code": country[1]} # We're assuming that each country entry has two elements
+                {"id": country[0], "country_name": country[1], "iso_code": country[2]}
                 for country in countries
-                if len(country) >= 2   # Ensure that country has at least 2 items
+                if len(country) >= 3  # Ensure the tuple has at least 3 items (id, country_name, iso_code)
             ]
 
             # Check if countries_list is empty after processing

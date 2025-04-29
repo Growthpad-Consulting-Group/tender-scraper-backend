@@ -1,387 +1,280 @@
 import re
-import logging
-from bs4 import BeautifulSoup
+import requests
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, unquote
+import PyPDF2
 from io import BytesIO
-import fitz  # PyMuPDF for handling PDF files
-from docx import Document  # Ensure you have python-docx installed for handling DOCX files
+from docx import Document
+from webapp.services.log import ScrapingLog
 
-# Configure logging for debugging and tracking purposes
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-def fetch_closing_keywords(db_connection):
-    """
-    Fetches closing keywords from the database.
-
-    Args:
-        db_connection: The active database connection object.
-
-    Returns:
-        list: A list of closing keywords.
-    """
-    cur = db_connection.cursor()
-    cur.execute("SELECT keyword FROM closing_keywords;")
-    keywords = [row[0] for row in cur.fetchall()]
-    cur.close()
-    return keywords
-
-
-def fetch_directory_keywords(db_connection, tender_type='Uploaded Websites'):
-    """
-    Fetches directory keywords from the database filtered by tender type.
-
-    Args:
-        db_connection: The active database connection object.
-        tender_type (str): The tender type to filter keywords.
-
-    Returns:
-        list: A list of directory keywords.
-    """
-    cur = db_connection.cursor()
-    cur.execute("SELECT keyword FROM directory_keywords WHERE tender_type = %s;", (tender_type,))
-    keywords = [row[0] for row in cur.fetchall()]
-    cur.close()
-    return keywords
-
-def is_relevant_tender(text: str, db_connection) -> str:
-    """
-    Checks for the presence of directory keywords in the provided text and returns matched keywords.
-
-    Args:
-        text (str): The text to search for relevant keywords.
-        db_connection: The active database connection object.
-
-    Returns:
-        str: Comma-separated matched keywords in their original case, or None if no relevant keywords are found.
-    """
-    directory_keywords = fetch_directory_keywords(db_connection, tender_type='Uploaded Websites')
-    if not directory_keywords:
-        logging.warning("No directory keywords found in the database for tender type 'Uploaded Websites'.")
-        return None
-
-    # Log the fetched directory keywords
-    logging.debug(f"Fetched directory keywords: {directory_keywords}")
-
-    # Compile regex pattern for keywords
-    directory_keywords_pattern = r"|".join(map(re.escape, directory_keywords))
-    logging.debug(f"Using regex pattern: {directory_keywords_pattern}")
-
-    # Find all matches in the text while ignoring case
-    matches = re.findall(directory_keywords_pattern, text, re.IGNORECASE)
-
-    if matches:
-        # Normalize to lowercase and remove duplicates
-        unique_matches = set(keyword.lower() for keyword in matches)
-        # Retrieve original-cased words from the matches
-        final_keywords = [keyword for keyword in directory_keywords if keyword.lower() in unique_matches]
-
-        # Log found keywords (original case)
-        logging.debug(f"Matched keywords in original case: {final_keywords}")
-
-        # Return unique matched keywords as a comma-separated string
-        return ', '.join(final_keywords)
-
-    return None  # No relevant keywords found
-
-
-
-
-
-def extract_closing_dates(text: str, db_connection) -> list:
-    """
-    Extracts closing dates from the provided text using regular expressions
-    and keywords fetched from the database.
-
-    Args:
-        text (str): The text to search for closing dates.
-        db_connection: The active database connection object.
-
-    Returns:
-        list: A list of tuples containing closing date keywords and the corresponding dates.
-    """
-    closing_keywords = fetch_closing_keywords(db_connection)
-    if not closing_keywords:
-        logging.warning("No closing keywords found in the database.")
-        return []
-
-    # Join keywords into a regex pattern
-    closing_keywords_pattern = r"|".join(map(re.escape, closing_keywords))
-    date_formats = r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s*(?:AM|PM)?\s*on\s*\d{1,2}\s+\w+\s+\d{4}|" \
-                   r"\w+\s+\d{1,2},\s+\d{4}|\d{1,2}\s+\w+\s+\d{4}|\d{1,2}\s+\w+\s+\d{2}|" \
-                   r"\w+\s+\d{1,2}|\d{1,2}\s*[ -]\s*\d{1,2})"
-
-    # Construct regex pattern and find matches
-    pattern = rf"({closing_keywords_pattern})[\s:]*({date_formats})"
-    matches = re.findall(pattern, text, re.IGNORECASE)
-    dates = [(match[1], match[0]) for match in matches]  # Store date and corresponding keyword
-    return dates
-
-
-def clean_date_string(date_str: str) -> str:
-    """
-    Cleans and formats the date string to a standard format.
-    
-    Args:
-        date_str (str): The raw date string to clean.
-    
-    Returns:
-        str: A cleaned date string.
-    """
-    # Remove suffixes like "st", "nd", "rd", "th"
-    date_str = re.sub(r'\b(\d+)(st|nd|rd|th)\b', r'\1', date_str)
-    # Remove day names (e.g., "Monday")
-    date_str = re.sub(r'(?i)(monday|tuesday|wednesday|thursday|friday|saturday|sunday)', '', date_str)
-    # Normalize whitespace
-    date_str = ' '.join(date_str.split())
-    return date_str
-
-def parse_closing_date(date: str) -> datetime.date:
-    """
-    Parses a cleaned date string into a datetime.date object.
-    
-    Args:
-        date (str): The cleaned date string to parse.
-    
-    Returns:
-        datetime.date: A date object representing the parsed date.
-    
-    Raises:
-        ValueError: If the date cannot be parsed into a known format.
-    """
-    cleaned_date = clean_date_string(date)
-
-    # Define the possible date formats
-    formats = [
-        "%d %B %Y", "%d %b %Y", "%d %m %Y", "%d/%m/%Y",
-        "%Y-%m-%d", "%B %d, %Y", "%d %B %y", "%d-%m-%Y",
-        "%d %B", "%B %d", "%I:%M %p on %d %B %Y", "%d %B %Y %I:%M %p",
-        "%d-%m-%y", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%m-%d-%y",
-        "%B %d %Y", "%B %d", "%d %b"
-    ]
-
-    # Try each format to parse the date
-    for fmt in formats:
-        try:
-            return datetime.strptime(cleaned_date, fmt).date()
-        except ValueError:
-            continue  # Try the next format if this fails
-
-    # Special handling for ambiguous month/day cases
-    if " " in cleaned_date:
-        month_day = cleaned_date.split(" ")
-        if len(month_day) == 2:
-            current_year = datetime.now().year
-            try:
-                return datetime.strptime(f"{month_day[1]} {month_day[0]} {current_year}", "%d %b %Y").date()
-            except ValueError:
-                pass  # Skip if this format fails
-
-    # Log the error if no formats matched
-    logging.error(f"Unable to parse date: {cleaned_date}")
-    raise ValueError(f"Unable to parse date: {cleaned_date}")
-
-def is_valid_url(url: str, base_url: str) -> str:
-    """
-    Validates and normalizes a given URL.
-    
-    Args:
-        url (str): The URL to validate.
-        base_url (str): The base URL to resolve relative URLs against.
-    
-    Returns:
-        str: The valid (and possibly normalized) URL, or None if invalid.
-    """
-    parsed_url = urlparse(url)
-
-    # Check for valid HTTP/HTTPS URLs
-    if parsed_url.scheme in ['http', 'https']:
-        return url
-
-    # Normalize relative URLs by joining with the base URL
-    if url.startswith('/'):
-        return urljoin(base_url, url)
-
-    # Log a warning for invalid URLs
-    logging.warning(f"Invalid URL encountered: {url}")
-    return None
+def is_valid_url(url: str) -> bool:
+    try:
+        url = unquote(url.strip().rstrip('/'))
+        result = urlparse(url)
+        if not all([result.scheme, result.netloc]):
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+                result = urlparse(url)
+            if not all([result.scheme, result.netloc]):
+                ScrapingLog.add_log(f"URL validation failed: {url} (scheme: {result.scheme}, netloc: {result.netloc})")
+                return False
+        return True
+    except ValueError as e:
+        ScrapingLog.add_log(f"URL parsing error: {url}, error: {str(e)}")
+        return False
 
 def get_format(url: str) -> str:
-    """
-    Determines the content format based on the file extension in the URL.
-    
-    Args:
-        url (str): The URL to inspect.
-    
-    Returns:
-        str: The format type as 'PDF', 'DOCX', or 'HTML'.
-    """
-    if url.lower().endswith('.pdf'):
+    parsed_url = urlparse(url)
+    path = parsed_url.path.lower()
+    if path.endswith('.pdf'):
         return 'PDF'
-    elif url.lower().endswith('.docx'):
-        return 'DOCX'
-    return 'HTML'  # Default is HTML format
+    elif path.endswith('.doc') or path.endswith('.docx'):
+        return 'DOC'
+    return 'HTML'
 
-def construct_search_url(search_engine: str, query: str) -> str:
-    """
-    Constructs search URLs for various search engines based on a query.
-    
-    Args:
-        search_engine (str): The name of the search engine.
-        query (str): The search query.
-    
-    Returns:
-        str: The full search URL for the specified search engine, or None if unsupported.
-    """
-    # Mapping of search engines to their respective base URLs
-    search_engines = {
-        "Google": "https://www.google.com/search?q=",
-        "Bing": "https://www.bing.com/search?q=",
-        "Yahoo": "https://search.yahoo.com/search?p=",
-        "DuckDuckGo": "https://duckduckgo.com/?q=",
-        "Ask": "https://www.ask.com/web?q="
-    }
-
-    if search_engine in search_engines:
-        return f"{search_engines[search_engine]}{query}"
-
-    # Log an error for unsupported search engines
-    logging.error(f"Search engine '{search_engine}' not supported.")
+def construct_search_url(engine: str, query: str) -> str:
+    query = query.replace(' ', '%20')
+    if engine == "Bing":
+        return f"https://www.bing.com/search?q={query}"
+    elif engine == "Startpage":
+        return f"https://www.startpage.com/do/dsearch?query={query}"
+    elif engine == "Ecosia":
+        return f"https://www.ecosia.org/search?q={query}"
+    elif engine == "Yahoo":
+        return f"https://search.yahoo.com/search?p={query}"
+    elif engine == "DuckDuckGo":
+        return f"https://duckduckgo.com/?q={query}"
     return None
 
-def extract_pdf_text(pdf_content: bytes) -> str:
-    """
-    Extracts text from the provided PDF content.
-    
-    Args:
-        pdf_content (bytes): The PDF file content as bytes.
-    
-    Returns:
-        str: The extracted text from the PDF.
-    """
-    # Open the PDF using PyMuPDF and extract text from each page
-    pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
-    text = ""
-    for page in pdf_document:
-        text += page.get_text()
-    pdf_document.close()  # Clean up
-    return text
-
-def extract_docx_text(docx_content: bytes) -> str:
-    """
-    Extracts text from the provided DOCX content.
-    
-    Args:
-        docx_content (bytes): The DOCX file content as bytes.
-    
-    Returns:
-        str: The extracted text from the DOCX file.
-    """
-    with BytesIO(docx_content) as f:
-        doc = Document(f)  # Load the DOCX file
-        # Join all paragraph texts into a single string
-        return "\n".join([paragraph.text for paragraph in doc.paragraphs])
-
 def extract_description_from_response(response, format_type: str) -> str:
-    """
-    Extracts a description from the HTTP response based on the content format.
-    
-    Args:
-        response: The HTTP response object containing the content.
-        format_type (str): The format of the content ('PDF', 'DOCX', or 'HTML').
-    
-    Returns:
-        str: A description extracted from the content, or an empty string if not found.
-    """
-    if format_type == 'PDF':
-        # For PDF, extract text and return the first line as the description
-        pdf_text = extract_pdf_text(response.content)
-        return pdf_text.split('\n')[0] if pdf_text else ""
-    else:  # For HTML or other formats
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Try to get description from the <meta> tag with name="description"
-        description_meta = soup.find('meta', attrs={'name': 'description'})
-        if description_meta and description_meta.get('content'):
-            return description_meta['content']
-
-        # Fallback: return the text of the first paragraph in the content
-        paragraphs = soup.find_all('p')
-        return paragraphs[0].text if paragraphs else ""
-
-def insert_tender_to_db(tender_info: dict, db_connection) -> bool:
-    """
-    Inserts or updates the tender information in the database.
-    
-    Args:
-        tender_info (dict): A dictionary containing all relevant information about the tender.
-        db_connection: The active database connection object.
-    
-    Returns:
-        bool: True if the operation was successful, False otherwise.
-    """
-    # Ensure the database connection is active
-    if db_connection is None:
-        logging.error("Database connection is not active.")
-        return False  # Return false if the connection is invalid
-
-    cur = db_connection.cursor()  # Create a cursor for database operations
-    current_date = datetime.now().date()  # Get today's date
-    # Determine the status of the tender based on its closing date
-    tender_info['status'] = 'open' if tender_info['closing_date'] > current_date else 'closed'
-
-    # SQL query to check for existing records
-    check_sql = """
-        SELECT * FROM tenders 
-        WHERE source_url = %s OR title = %s
-    """
-    params_check = (tender_info['source_url'], tender_info['title'])
-
     try:
-        # Execute the check for existing tender records
-        cur.execute(check_sql, params_check)
-        existing_tender = cur.fetchone()
+        if format_type == 'PDF':
+            pdf_reader = PyPDF2.PdfReader(BytesIO(response.content))
+            text = ''
+            for page in pdf_reader.pages:
+                text += page.extract_text()
+            return text[:500]
+        elif format_type == 'DOC':
+            doc = Document(BytesIO(response.content))
+            text = ' '.join(paragraph.text for paragraph in doc.paragraphs)
+            return text[:500]
+        elif format_type == 'HTML':
+            soup = BeautifulSoup(response.text, 'html.parser')
+            paragraphs = soup.find_all('p')
+            description = ' '.join(p.text for p in paragraphs)[:500]
+            return description
+        return response.text[:500]
+    except Exception as e:
+        ScrapingLog.add_log(f"Error extracting description: {str(e)}")
+        return ""
 
-        if existing_tender:
-            # Log a warning if a duplicate tender is found
-            logging.warning(f"Duplicate found for Source URL: {tender_info['source_url']} or Title: {tender_info['title']}. Overwriting the record in the database.")
+def fetch_closing_keywords(db_connection):
+    default_keywords = ["closing date", "deadline", "submission date", "due date"]
+    try:
+        cur = db_connection.cursor()
+        cur.execute("SELECT keyword FROM closing_keywords;")
+        keywords = [row[0] for row in cur.fetchall()]
+        cur.close()
+        if not keywords:
+            return default_keywords
+        return keywords
+    except Exception as e:
+        return default_keywords
 
-        # SQL statement to insert or update the tender record
-        insert_sql = """
-            INSERT INTO tenders (title, description, closing_date, source_url, status, scraped_at, format, tender_type)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+def fetch_relevant_keywords(db_connection) -> list:
+    default_keywords = ["tender", "rfp", "request for proposal", "procurement", "bid"]
+    try:
+        cur = db_connection.cursor()
+        cur.execute("SELECT keyword FROM relevant_keywords;")
+        keywords = [row[0] for row in cur.fetchall()]
+        cur.close()
+        if not keywords:
+            ScrapingLog.add_log(f"No keywords found in relevant_keywords, using defaults: {default_keywords}")
+            return default_keywords
+        return keywords
+    except Exception as e:
+        ScrapingLog.add_log(f"Error fetching keywords: {str(e)}")
+        return default_keywords
+
+def clean_date_string(date_str: str) -> str:
+    try:
+        # Remove day names (e.g., "Monday", "Tuesday", etc.)
+        date_str = re.sub(r'\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b', '', date_str, flags=re.IGNORECASE)
+        
+        # Remove time portions like "AT 10:00 AM"
+        date_str = re.sub(r"\bAT\s+\d{1,2}:\d{2}\s*(AM|PM)?", "", date_str, flags=re.IGNORECASE)
+        
+        # Remove ordinal suffixes (e.g., "25th" -> "25")
+        date_str = re.sub(r'\b(\d+)(st|nd|rd|th)\b', r'\1', date_str, flags=re.IGNORECASE)
+
+        # Normalize multiple spaces to a single space
+        date_str = re.sub(r'\s+', ' ', date_str).strip()
+
+        # Lowercase and capitalize correctly (e.g., "march" -> "March")
+        date_str = date_str.lower().title()
+
+        return date_str
+    except Exception as e:
+        ScrapingLog.add_log(f"Error cleaning date string {date_str}: {str(e)}")
+        return date_str
+
+def extract_closing_dates(text: str, db_connection) -> list:
+    closing_keywords = fetch_closing_keywords(db_connection)
+    if not closing_keywords:
+        return []
+
+    date_formats = [
+        r"(?:\w+day\s+)?\d{1,2}(?:st|nd|rd|th)?\s*(?:of\s+)?\w+\s+\d{4}",
+        r"\w+day\s+\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+\d{4}",
+        r"\d{1,2}\s+\w+\s+\d{4}\s+AT\s+\d{1,2}:\d{2}\s+(?:AM|PM)",
+        r"\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+\d{4}",
+        r"\d{1,2}/\d{1,2}/\d{4}",
+        r"\d{4}-\d{2}-\d{2}",
+        r"\w+\s+\d{1,2},\s+\d{4}",
+        r"\w+\s+\d{1,2}\s+\d{4}",
+        r"\d{1,2}-\w{3}-\d{4}"
+    ]
+
+    combined_pattern = "|".join(f"(?:{pattern})" for pattern in date_formats)
+    pattern = re.compile(combined_pattern, re.IGNORECASE)
+
+    closing_dates = []
+    for keyword in closing_keywords:
+        keyword_pattern = re.compile(rf"{re.escape(keyword)}\s*:\s*(.+?)(?:\n|$|\s{{2,}})", re.IGNORECASE)
+        matches = keyword_pattern.finditer(text)
+        for match in matches:
+            date_str = match.group(1).strip()
+            date_match = pattern.search(date_str)
+            if date_match:
+                closing_dates.append((date_match.group(), keyword))
+                break
+
+    if not closing_dates:
+        for match in pattern.finditer(text):
+            closing_dates.append((match.group(), None))
+
+    ScrapingLog.add_log(f"Extracted dates: {closing_dates}")
+    if not closing_dates:
+        ScrapingLog.add_log(f"No dates found. Text sample: {text[:500]}...")
+
+    return closing_dates
+
+def parse_closing_date(date_str: str) -> datetime.date:
+    try:
+        date_str = clean_date_string(date_str)
+
+        # Common formats to try
+        formats_to_try = [
+            "%d %B %Y",      # 25 March 2025
+            "%dth %B %Y",    # 25 Emileth March 2025
+            "%d %b %Y",      # 25 Mar 2025
+            "%d/%m/%Y",      # 25/03/2025
+            "%Y-%m-%d",      # 2025-03-25
+            "%B %d, %Y",     # March 25, 2025
+            "%d-%b-%Y",      # 25-Mar-2025
+            "%B %d %Y",      # March 25 2025
+            "%Y-%m-%d %H:%M:%S",  # 2025-04-29 10:00:00
+            "%Y-%m-%d %H:%M"      # 2024-04-19 16:00
+        ]
+
+        # Handle special case with dot in time (e.g., '2023-09-28 11.00:00')
+        date_str = date_str.replace('11.00:00', '11:00:00')
+
+        for fmt in formats_to_try:
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+
+        # Final fallback using dateutil's smart parser
+        try:
+            from dateutil import parser
+            return parser.parse(date_str, fuzzy=True).date()
+        except ImportError:
+            ScrapingLog.add_log("dateutil.parser not available, skipping fuzzy parsing")
+        except Exception as e:
+            ScrapingLog.add_log(f"dateutil.parser failed to parse date: {date_str}, error: {str(e)}")
+
+        ScrapingLog.add_log(f"Failed to parse closing date after trying all formats: {date_str}")
+        return None
+    except Exception as e:
+        ScrapingLog.add_log(f"Error parsing date {date_str}: {str(e)}")
+        return None
+
+def is_relevant_tender(text: str, db_connection) -> tuple[bool, list]:
+    keywords = fetch_relevant_keywords(db_connection)
+    if not keywords:
+        return False, []
+    
+    matched_keywords = []
+    for keyword in keywords:
+        if re.search(re.escape(keyword), text, re.IGNORECASE):
+            matched_keywords.append(keyword)
+    
+    return bool(matched_keywords), matched_keywords
+
+def insert_tender_to_db(tender_info, db_connection):
+    try:
+        cur = db_connection.cursor()
+        
+        # Check if the tender already exists based on source_url
+        cur.execute("SELECT 1 FROM tenders WHERE source_url = %s;", (tender_info['source_url'],))
+        exists = cur.fetchone() is not None
+
+        # Perform the insert or update
+        cur.execute("""
+            INSERT INTO tenders (title, description, closing_date, source_url, status, scraped_at, format, tender_type, location)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source_url) DO UPDATE
-            SET closing_date = EXCLUDED.closing_date,
-                status = EXCLUDED.status,
+            SET title = EXCLUDED.title,
                 description = EXCLUDED.description,
+                closing_date = EXCLUDED.closing_date,
+                status = EXCLUDED.status,
                 scraped_at = EXCLUDED.scraped_at,
                 format = EXCLUDED.format,
-                tender_type = EXCLUDED.tender_type
-        """
-
-        params = (
+                tender_type = EXCLUDED.tender_type,
+                location = EXCLUDED.location;
+        """, (
             tender_info['title'],
-            tender_info.get('description', ''),
+            tender_info['description'],
             tender_info['closing_date'],
             tender_info['source_url'],
             tender_info['status'],
             tender_info['scraped_at'],
             tender_info['format'],
-            tender_info['tender_type']
-        )
-
-        logging.debug(f"Executing SQL: {insert_sql}")
-        logging.debug(f"With parameters: {params}")
-
-        # Execute the insert/update operation
-        cur.execute(insert_sql, params)
-        db_connection.commit()  # Commit the transaction
-        logging.info(f"Successfully inserted/updated tender: {tender_info['title']}")
-        return True  # Indicate success
+            tender_info['tender_type'],
+            tender_info['location']
+        ))
+        
+        # Log the action
+        action = "updated" if exists else "inserted"
+        ScrapingLog.add_log(f"Tender {action} in database: source_url={tender_info['source_url']}")
+        
+        db_connection.commit()
+        cur.close()
+        return True
     except Exception as e:
-        db_connection.rollback()  # Roll back if there was an error
-        logging.error(f"Error inserting/updating tender: {str(e)}")
-        return False  # Indicate failure
-    finally:
-        cur.close()  # Always ensure the cursor is closed to free up resources
+        ScrapingLog.add_log(f"Error inserting/updating tender: {str(e)}")
+        db_connection.rollback()
+        return False
+
+def extract_pdf_text(pdf_content: bytes) -> str:
+    try:
+        pdf_reader = PyPDF2.PdfReader(BytesIO(pdf_content))
+        text = ''
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+        return text
+    except Exception as e:
+        ScrapingLog.add_log(f"Error extracting PDF text: {str(e)}")
+        return ""
+
+def extract_docx_text(docx_content: bytes) -> str:
+    try:
+        doc = Document(BytesIO(docx_content))
+        text = ' '.join(paragraph.text for paragraph in doc.paragraphs)
+        return text
+    except Exception as e:
+        ScrapingLog.add_log(f"Error extracting DOCX text: {str(e)}")
+        return ""

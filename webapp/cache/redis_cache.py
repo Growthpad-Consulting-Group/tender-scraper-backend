@@ -1,49 +1,69 @@
-# redis_cache.py
-
 import os
 import redis
 import json
-from typing import Any, Optional
+import logging
+from retrying import retry
+import certifi
 
-# Initialize Redis connection
-REDIS_URL = os.getenv('REDIS_URL')
-REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Ensure Redis connection parameters are set
-if not REDIS_URL or not REDIS_PASSWORD:
-    raise ValueError("Redis connection parameters are not set in the environment variables.")
+# Initialize Redis client
+redis_client = None
+try:
+    redis_client = redis.Redis(
+        host=os.getenv('REDIS_URL'),
+        port=int(os.getenv('REDIS_PORT', 6379)),
+        password=os.getenv('REDIS_PASSWORD'),
+        ssl=True,
+        ssl_cert_reqs="required",
+        ssl_ca_certs=certifi.where(),
+        decode_responses=True
+    )
+    # Test the connection
+    redis_client.ping()
+    logging.info("Successfully connected to Redis")
+except Exception as e:
+    logging.error(f"Failed to connect to Redis: {str(e)}")
+    redis_client = None
 
-# Create a Redis client
-redis_client = redis.Redis(
-    host=REDIS_URL,
-    port=6379,
-    password=REDIS_PASSWORD,
-    ssl=True,
-    decode_responses=True
-)
-
-
-def set_cache(key: str, value: Any, expiry: int = 300) -> None:
-    """Set a value in cache with an expiration time."""
+@retry(stop_max_attempt_number=3, wait_fixed=2000)
+def get_cache(key):
+    """Retrieve data from Redis cache."""
+    if redis_client is None:
+        logging.warning("Redis client not initialized, skipping cache")
+        return None
     try:
-        redis_client.set(key, json.dumps(value), ex=expiry)
-    except redis.RedisError as e:
-        print(f"Redis error while setting cache for key {key}: {e}")
-
-
-def get_cache(key: str) -> Optional[Any]:
-    """Get a value from cache, returning None if it does not exist."""
-    try:
-        value = redis_client.get(key)
-        return json.loads(value) if value else None
-    except redis.RedisError as e:
-        print(f"Redis error while getting cache for key {key}: {e}")
+        cached_data = redis_client.get(key)
+        if cached_data:
+            logging.info(f"Cache hit for key: {key}")
+            return json.loads(cached_data)
+        logging.info(f"Cache miss for key: {key}")
+        return None
+    except Exception as e:
+        logging.error(f"Error getting cache for key {key}: {str(e)}")
         return None
 
+@retry(stop_max_attempt_number=3, wait_fixed=2000)
+def set_cache(key, value, expiry=3600):
+    """Store data in Redis cache with an optional expiry time (in seconds)."""
+    if redis_client is None:
+        logging.warning("Redis client not initialized, skipping cache set")
+        return
+    try:
+        redis_client.setex(key, expiry, json.dumps(value))
+        logging.info(f"Cache set for key: {key} with expiry: {expiry} seconds")
+    except Exception as e:
+        logging.error(f"Error setting cache for key {key}: {str(e)}")
 
-def delete_cache(key: str) -> None:
-    """Delete a value from cache."""
+@retry(stop_max_attempt_number=3, wait_fixed=2000)
+def delete_cache(key):
+    """Delete a key from Redis cache."""
+    if redis_client is None:
+        logging.warning("Redis client not initialized, skipping cache delete")
+        return
     try:
         redis_client.delete(key)
-    except redis.RedisError as e:
-        print(f"Redis error while deleting cache for key {key}: {e}")
+        logging.info(f"Cache deleted for key: {key}")
+    except Exception as e:
+        logging.error(f"Error deleting cache for key {key}: {str(e)}")

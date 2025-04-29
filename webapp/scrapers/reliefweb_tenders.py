@@ -1,12 +1,16 @@
 import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, date
 import logging
-import time
-import urllib.parse
-from datetime import datetime
+import re
+import uuid
 from webapp.config import get_db_connection
 from webapp.routes.tenders.tender_utils import insert_tender_to_db
-from webapp.db.db import get_directory_keywords
+from webapp.db.db import get_relevant_keywords
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def get_format(url):
     """Determine the document format based on the URL."""
@@ -14,144 +18,371 @@ def get_format(url):
         return 'PDF'
     elif url.lower().endswith('.docx'):
         return 'DOCX'
-    return 'HTML'  # Default to HTML if no specific format is found
-
+    return 'HTML'
 
 def ensure_db_connection():
     """Check and ensure the database connection is valid."""
     try:
         db_connection = get_db_connection()
         if db_connection is None:
-            logging.warning("Database connection is None. Reconnecting...")
+            logger.warning("Database connection is None. Reconnecting...")
             return None
-
-        # Test the connection by executing a simple query
         cursor = db_connection.cursor()
-        cursor.execute("SELECT 1")  # Simple query to test connection
+        cursor.execute("SELECT 1")
         cursor.close()
         return db_connection
     except Exception as e:
-        logging.error(f"Error establishing or testing database connection: {str(e)}")
+        logger.error(f"Error establishing or testing database connection: {str(e)}")
         return None
 
+def make_tender_serializable(tender):
+    """Convert non-serializable fields in a tender dictionary to serializable formats."""
+    serializable_tender = tender.copy()
+    if 'closing_date' in serializable_tender and isinstance(serializable_tender['closing_date'], date):
+        serializable_tender['closing_date'] = serializable_tender['closing_date'].isoformat()
+    if 'scraped_at' in serializable_tender and isinstance(serializable_tender['scraped_at'], date):
+        serializable_tender['scraped_at'] = serializable_tender['scraped_at'].isoformat()
+    return serializable_tender
 
-def fetch_reliefweb_tenders():
-    """Fetches tenders from the ReliefWeb API and inserts them into the database."""
-    base_api_url = "https://api.reliefweb.int/v1/jobs?appname=gcg-tender&profile=list&preset=latest&slim=1"
-    session = requests.Session()  # Use a session for persistent connections
+def fetch_reliefweb_tenders(scraping_task_id=None, set_task_state=None, socketio=None):
+    """Scrapes tenders from ReliefWeb and inserts them into the database."""
+    url = "https://reliefweb.int/updates?content=procurement"
 
-    retry_attempts = 3
-    for attempt in range(retry_attempts):
-        try:
-            logging.info(f"Attempting to fetch tenders, attempt {attempt + 1}")
+    # Generate a scraping_task_id if not provided (for standalone execution)
+    scraping_task_id = scraping_task_id or str(uuid.uuid4())
+    start_time = datetime.now().isoformat()
 
-            # Ensure we have a valid database connection
+    # Initialize task state
+    set_task_state(scraping_task_id, {
+        "status": "running",
+        "startTime": start_time,
+        "tenders": [],
+        "visited_urls": [url],
+        "total_urls": 1,
+        "summary": {}
+    })
+    socketio.emit('scrape_update', {
+        'taskId': scraping_task_id,
+        'status': 'running',
+        'startTime': start_time,
+        'tenders': [],
+        'visitedUrls': [url],
+        'totalUrls': 1,
+        'message': "Started scraping ReliefWeb tenders"
+    }, namespace='/scraping')
+
+    tenders = []
+    open_tenders = 0
+    closed_tenders = 0
+    visited_urls = [url]
+    db_connection = None
+
+    try:
+        response = requests.get(url)
+        if response.status_code != 200:
+            logger.error(f"Failed to retrieve ReliefWeb page, status code: {response.status_code}")
+            set_task_state(scraping_task_id, {
+                "status": "error",
+                "startTime": start_time,
+                "tenders": [],
+                "visited_urls": visited_urls,
+                "total_urls": len(visited_urls),
+                "summary": {}
+            })
+            socketio.emit('scrape_update', {
+                'taskId': scraping_task_id,
+                'status': 'error',
+                'startTime': start_time,
+                'tenders': [],
+                'visitedUrls': visited_urls,
+                'totalUrls': len(visited_urls),
+                'summary': {
+                    "urlsVisited": len(visited_urls),
+                    "openTenders": open_tenders,
+                    "closedTenders": closed_tenders,
+                    "totalTenders": len(tenders)
+                },
+                'message': f"Failed to retrieve ReliefWeb page, status code: {response.status_code}"
+            }, namespace='/scraping')
+            return tenders  # Return empty tenders list
+
+        logger.info("Successfully retrieved ReliefWeb page.")
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        tender_elements = soup.find_all('article', class_='article')
+        logger.info(f"Found {len(tender_elements)} tenders.")
+
+        db_connection = ensure_db_connection()
+        if not db_connection:
+            logger.error("Failed to establish a database connection.")
+            set_task_state(scraping_task_id, {
+                "status": "error",
+                "startTime": start_time,
+                "tenders": [],
+                "visited_urls": visited_urls,
+                "total_urls": len(visited_urls),
+                "summary": {}
+            })
+            socketio.emit('scrape_update', {
+                'taskId': scraping_task_id,
+                'status': 'error',
+                'startTime': start_time,
+                'tenders': [],
+                'visitedUrls': visited_urls,
+                'totalUrls': len(visited_urls),
+                'summary': {
+                    "urlsVisited": len(visited_urls),
+                    "openTenders": open_tenders,
+                    "closedTenders": closed_tenders,
+                    "totalTenders": len(tenders)
+                },
+                'message': "Failed to establish database connection"
+            }, namespace='/scraping')
+            return tenders  # Return empty tenders list
+
+        keywords = get_relevant_keywords(db_connection)
+        if not keywords:
+            logger.warning("No keywords found for 'ReliefWeb'. Aborting scrape.")
+            set_task_state(scraping_task_id, {
+                "status": "error",
+                "startTime": start_time,
+                "tenders": [],
+                "visited_urls": visited_urls,
+                "total_urls": len(visited_urls),
+                "summary": {}
+            })
+            socketio.emit('scrape_update', {
+                'taskId': scraping_task_id,
+                'status': 'error',
+                'startTime': start_time,
+                'tenders': [],
+                'visitedUrls': visited_urls,
+                'totalUrls': len(visited_urls),
+                'summary': {
+                    "urlsVisited": len(visited_urls),
+                    "openTenders": open_tenders,
+                    "closedTenders": closed_tenders,
+                    "totalTenders": len(tenders)
+                },
+                'message': "No keywords found for 'ReliefWeb'"
+            }, namespace='/scraping')
+            return tenders  # Return empty tenders list
+
+        keywords = [keyword.lower() for keyword in keywords]
+
+        for tender in tender_elements:
+            title_elem = tender.find('h2', class_='article-title')
+            title = title_elem.text.strip() if title_elem else "N/A"
+
+            # Check if the title contains any of the keywords
+            if not any(keyword in title.lower() for keyword in keywords):
+                continue
+
+            link_elem = title_elem.find('a') if title_elem else None
+            source_url = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
+            if not source_url:
+                continue
+            if not source_url.startswith('http'):
+                source_url = f"https://reliefweb.int{source_url}"
+            if source_url not in visited_urls:
+                visited_urls.append(source_url)
+
+            description_elem = tender.find('div', class_='description')
+            description = description_elem.text.strip() if description_elem else title
+
+            date_elem = tender.find('time')
+            date_str = date_elem['datetime'] if date_elem and 'datetime' in date_elem.attrs else None
+
+            if date_str:
+                try:
+                    deadline_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except ValueError as e:
+                    logger.error(f"Error parsing deadline date for tender '{title}': {e}")
+                    continue
+            else:
+                continue
+
+            # Assume the deadline is the publication date for ReliefWeb; adjust status accordingly
+            status = "open" if deadline_date > datetime.now().date() else "closed"
+            if status == "open":
+                open_tenders += 1
+            else:
+                closed_tenders += 1
+            format_type = get_format(source_url)
+
+            tender_data = {
+                'title': title,
+                'description': description,
+                'closing_date': deadline_date,
+                'source_url': source_url,
+                'status': status,
+                'format': format_type,
+                'scraped_at': datetime.now().date(),
+                'tender_type': "ReliefWeb",
+                'location': "Global",
+            }
+            tenders.append(tender_data)
+
             db_connection = ensure_db_connection()
             if not db_connection:
-                logging.error("Failed to establish a database connection.")
-                return []
-
-            # Fetch keywords from the database
-            try:
-                logging.info("Fetching keywords from the database...")
-                keywords = get_directory_keywords(db_connection)
-                logging.info(f"Fetched keywords: {keywords}")
-            except Exception as db_error:
-                logging.error(f"Error fetching keywords from database: {db_error}")
-                return []
-
-            if not keywords:
-                logging.warning("No keywords found in the database.")
-                return []
-
-            logging.info("Keywords fetched successfully.")
-
-            # Construct the API URL with the keyword query
-            keyword_query = ' OR '.join(keywords)
-            country_ids = "131 OR 217 OR 198 OR 102 OR 240 OR 216 OR 175 OR 231 OR 244 OR 256 OR 96 OR 87 OR 82 OR 16"
-            type_id = 264
-            query_value = f"({keyword_query}) AND (country.id:({country_ids}) AND type.id:{type_id})"
-            encoded_query_value = urllib.parse.quote(query_value)
-            api_url = f"{base_api_url}&query%5Bvalue%5D={encoded_query_value}&query%5Boperator%5D=AND"
-
-            # Fetch data from the ReliefWeb API with retry logic
-            response = None
-            for _ in range(3):  # Retry up to 3 times with increasing backoff
-                try:
-                    logging.info(f"Sending API request.")
-                    response = session.get(api_url, timeout=10)  # Set a timeout of 10 seconds
-                    if response.status_code == 200:
-                        logging.info(f"API request successful: {response.status_code}")
-                        break
-                    else:
-                        logging.error(f"Failed to fetch tenders, status code: {response.status_code}")
-                except requests.RequestException as e:
-                    logging.error(f"Request error: {str(e)}")
-                time.sleep(2 ** _)  # Exponential backoff (1s, 2s, 4s, ...)
-
-            if response is None or response.status_code != 200:
-                logging.error("Failed to fetch tenders after multiple attempts.")
-                return []
-
-            # Process the API response
-            data = response.json()
-            tenders = []
-
-            # Reconnect to the database to insert tender data
-            db_connection = ensure_db_connection()  # Ensure connection is active
-            if not db_connection:
-                logging.error("Failed to establish a database connection for insertion.")
-                return []
-
-            # Process and insert tenders into the database
-            for job in data['data']:
-                title = job['fields']['title']
-                closing_date = job['fields']['date'].get('closing') if 'date' in job['fields'] else None
-
-                if closing_date:
-                    closing_date_obj = datetime.strptime(closing_date, "%Y-%m-%dT%H:%M:%S%z").date()
-                    status = "open" if closing_date_obj > datetime.now().date() else "closed"
-                    organization = job['fields']['source'][0]['name'] if job['fields'].get('source') else 'Unknown'
-
-                    # Prepare the tender info
-                    source_url = job['fields']['url']
-                    format_type = get_format(source_url)
-
-                    tender_info = {
-                        'title': title,
-                        'closing_date': closing_date_obj,
-                        'source_url': source_url,
-                        'status': status,
-                        'format': format_type,
-                        'description': organization,
-                        'scraped_at': datetime.now(),
-                        'tender_type': "ReliefWeb Jobs"
+                logger.error("Database connection dropped. Skipping insertion.")
+                serializable_tenders = [make_tender_serializable(t) for t in tenders]
+                set_task_state(scraping_task_id, {
+                    "status": "error",
+                    "startTime": start_time,
+                    "tenders": serializable_tenders,
+                    "visited_urls": visited_urls,
+                    "total_urls": len(visited_urls),
+                    "summary": {
+                        "urlsVisited": len(visited_urls),
+                        "openTenders": open_tenders,
+                        "closedTenders": closed_tenders,
+                        "totalTenders": len(tenders)
                     }
-                    tenders.append(tender_info)
+                })
+                socketio.emit('scrape_update', {
+                    'taskId': scraping_task_id,
+                    'status': 'error',
+                    'startTime': start_time,
+                    'tenders': serializable_tenders,
+                    'visitedUrls': visited_urls,
+                    'totalUrls': len(visited_urls),
+                    'summary': {
+                        "urlsVisited": len(visited_urls),
+                        "openTenders": open_tenders,
+                        "closedTenders": closed_tenders,
+                        "totalTenders": len(tenders)
+                    },
+                    'message': "Database connection dropped during insertion"
+                }, namespace='/scraping')
+                return tenders  # Return tenders collected so far
 
-                    # Insert tender information into the database
-                    try:
-                        logging.info(f"Attempting to insert tender '{title}' into the database.")
-                        success = insert_tender_to_db(tender_info, db_connection)
-                        if success:
-                            logging.info(f"Inserted Tender: {tender_info['title']}")
-                        else:
-                            logging.error(f"Failed to insert Tender: {tender_info['title']}")
-                    except Exception as insert_error:
-                        logging.error(f"Error during inserting tender '{title}': {str(insert_error)}")
+            try:
+                insert_tender_to_db(tender_data, db_connection)
+                logger.info(f"Tender inserted into database: {title}")
+                logger.info(f"Title: {title}\n"
+                            f"Description: {description}\n"
+                            f"Closing Date: {deadline_date}\n"
+                            f"Status: {status}\n"
+                            f"Source URL: {source_url}\n"
+                            f"Format: {format_type}\n"
+                            f"Tender Type: ReliefWeb\n")
+                logger.info("=" * 40)
 
-                else:
-                    logging.warning(f"Skipping job '{title}' due to missing closing date.")
+                # Create a serializable version of tenders for Redis and Socket.IO
+                serializable_tenders = [make_tender_serializable(t) for t in tenders]
 
-            break  # Exit retry loop after successful execution
+                # Emit an update with the current state
+                set_task_state(scraping_task_id, {
+                    "status": "running",
+                    "startTime": start_time,
+                    "tenders": serializable_tenders,
+                    "visited_urls": visited_urls,
+                    "total_urls": len(visited_urls),
+                    "summary": {
+                        "urlsVisited": len(visited_urls),
+                        "openTenders": open_tenders,
+                        "closedTenders": closed_tenders,
+                        "totalTenders": len(tenders)
+                    }
+                })
+                socketio.emit('scrape_update', {
+                    'taskId': scraping_task_id,
+                    'status': 'running',
+                    'startTime': start_time,
+                    'tenders': serializable_tenders,
+                    'visitedUrls': visited_urls,
+                    'totalUrls': len(visited_urls),
+                    'summary': {
+                        "urlsVisited": len(visited_urls),
+                        "openTenders": open_tenders,
+                        "closedTenders": closed_tenders,
+                        "totalTenders": len(tenders)
+                    },
+                    'message': f"Processed tender: {title}"
+                }, namespace='/scraping')
+            except Exception as e:
+                logger.error(f"Error inserting tender '{title}' into database: {e}")
 
-        except Exception as e:
-            logging.error(f"An error occurred during attempt {attempt + 1}: {str(e)}")
-            time.sleep(5)  # Exponential backoff on errors
+        # Calculate time taken
+        time_taken = (datetime.now() - datetime.fromisoformat(start_time)).total_seconds()
 
-    session.close()  # Always close the session after the task
+        # Create a serializable version of tenders for the final state
+        serializable_tenders = [make_tender_serializable(t) for t in tenders]
 
+        # Emit completion event
+        set_task_state(scraping_task_id, {
+            "status": "complete",
+            "startTime": start_time,
+            "tenders": serializable_tenders,
+            "visited_urls": visited_urls,
+            "total_urls": len(visited_urls),
+            "summary": {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": time_taken,
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            }
+        })
+        socketio.emit('scrape_update', {
+            'taskId': scraping_task_id,
+            'status': 'complete',
+            'startTime': start_time,
+            'tenders': serializable_tenders,
+            'visitedUrls': visited_urls,
+            'totalUrls': len(visited_urls),
+            'summary': {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": time_taken,
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            },
+            'message': "Completed scraping ReliefWeb tenders"
+        }, namespace='/scraping')
+
+        logger.info("Scraping completed.")
+        return tenders  # Return tenders on successful completion
+
+    except Exception as e:
+        logger.error(f"An error occurred while scraping: {e}")
+        serializable_tenders = [make_tender_serializable(t) for t in tenders]
+        set_task_state(scraping_task_id, {
+            "status": "error",
+            "startTime": start_time,
+            "tenders": serializable_tenders,
+            "visited_urls": visited_urls,
+            "total_urls": len(visited_urls),
+            "summary": {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": (datetime.now() - datetime.fromisoformat(start_time)).total_seconds(),
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            }
+        })
+        socketio.emit('scrape_update', {
+            'taskId': scraping_task_id,
+            'status': 'error',
+            'startTime': start_time,
+            'tenders': serializable_tenders,
+            'visitedUrls': visited_urls,
+            'totalUrls': len(visited_urls),
+            'summary': {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": (datetime.now() - datetime.fromisoformat(start_time)).total_seconds(),
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            },
+            'message': f"Error scraping ReliefWeb tenders: {str(e)}"
+        }, namespace='/scraping')
+        return tenders  # Return tenders collected so far
+    finally:
+        if db_connection:
+            db_connection.close()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)  # Set logging level
-    fetch_reliefweb_tenders()
+    tenders = fetch_reliefweb_tenders()
+    logger.info(f"Scraped {len(tenders)} tenders")

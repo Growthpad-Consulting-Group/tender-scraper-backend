@@ -89,35 +89,29 @@ def get_keywords_and_terms(db_connection):
             return []
 
 
-def get_directory_keywords(db_connection, tender_type=None):
-    """Fetches keywords from the directory_keywords table, optionally filtered by tender_type."""
-    with closing(db_connection) as conn:
-        cur = conn.cursor()
-        try:
-            if tender_type:
-                logging.info(f"Fetching keywords filtered by tender_type: {tender_type}")
-                cur.execute("SELECT keyword FROM directory_keywords WHERE tender_type = %s", (tender_type,))
-            else:
-                logging.info("Fetching all keywords without filtering")
-                cur.execute("SELECT keyword FROM directory_keywords")
-
-            keywords = [row[0] for row in cur.fetchall()]
-            logging.info(f"Fetched keywords: {keywords}")  # Log the fetched keywords
-            return keywords
-        except Exception as e:
-            logging.error("Error retrieving keywords: %s", str(e))
-            return []
+def get_relevant_keywords(db_connection):
+    """Fetches keywords from the relevant_keywords table."""
+    try:
+        cur = db_connection.cursor()
+        logging.info("Fetching all keywords from relevant_keywords")
+        cur.execute("SELECT keyword FROM relevant_keywords")
+        keywords = [row[0] for row in cur.fetchall()]
+        logging.info(f"Fetched keywords: {keywords}")
+        cur.close()
+        return keywords
+    except Exception as e:
+        logging.error(f"Error retrieving keywords: {str(e)}")
+        return []
 
 
-
-def rename_directory_keyword(db_connection, old_keyword, new_keyword):
-    """Renames a keyword in the directory_keywords table."""
+def rename_relevant_keyword(db_connection, old_keyword, new_keyword):
+    """Renames a keyword in the relevant_keywords table."""
     try:
         cur = db_connection.cursor()
 
         # SQL query to rename the keyword
         update_sql = '''
-            UPDATE directory_keywords
+            UPDATE relevant_keywords
             SET keyword = %s
             WHERE keyword = %s
         '''
@@ -130,44 +124,44 @@ def rename_directory_keyword(db_connection, old_keyword, new_keyword):
             # No rows updated means the old keyword doesn't exist
             raise Exception(f"Keyword '{old_keyword}' does not exist.")
 
-        logging.info(f"Successfully renamed directory keyword from '{old_keyword}' to '{new_keyword}'")
+        logging.info(f"Successfully renamed relevant keyword from '{old_keyword}' to '{new_keyword}'")
         return True  # Indicate success
 
     except Exception as e:
         db_connection.rollback()
-        logging.error(f"Error renaming directory keyword from '{old_keyword}' to '{new_keyword}': {str(e)}")
+        logging.error(f"Error renaming relevant keyword from '{old_keyword}' to '{new_keyword}': {str(e)}")
         raise
     finally:
         if cur and not cur.closed:  # Close the cursor only if open
             cur.close()
 
 
-def add_directory_keyword_to_db(db_connection, keyword, tender_type):
-    """Adds a new keyword to the directory_keywords table."""
+def add_relevant_keyword_to_db(db_connection, keyword):
+    """Adds a new keyword to the relevant_keywords table."""
     cur = None  # Ensure cur is defined for the finally block
     try:
         cur = db_connection.cursor()
 
         # SQL query to insert a new keyword
         insert_sql = '''
-            INSERT INTO directory_keywords (keyword, tender_type)
-            VALUES (%s, %s)
+            INSERT INTO relevant_keywords (keyword)
+            VALUES (%s)
             RETURNING id
         '''
 
-        logging.info(f"Attempting to add keyword: {keyword} with tender_type: {tender_type}")
+        logging.info(f"Attempting to add keyword: {keyword}")
 
         # Execute the insertion query
-        cur.execute(insert_sql, (keyword, tender_type))
+        cur.execute(insert_sql, (keyword,))
         db_connection.commit()
 
         new_id = cur.fetchone()[0]  # Get the new keyword ID
-        logging.info(f"Successfully added new directory keyword with ID: {new_id}")
+        logging.info(f"Successfully added new relevant keyword with ID: {new_id}")
         return new_id  # Return the new keyword ID
 
     except Exception as e:
         db_connection.rollback()
-        logging.error(f"Error adding directory keyword '{keyword}': {str(e)}")
+        logging.error(f"Error adding relevant keyword '{keyword}': {str(e)}")
         raise  # Reraise the exception for handling in the calling code
     finally:
         if cur:  # Always check if cur is defined before trying to close
@@ -175,13 +169,12 @@ def add_directory_keyword_to_db(db_connection, keyword, tender_type):
             logging.info("Cursor closed successfully.")
 
 
-
-def remove_directory_keyword_from_db(cur, keyword):
-    """Removes a keyword from the directory_keywords table."""
+def remove_relevant_keyword_from_db(cur, keyword):
+    """Removes a keyword from the relevant_keywords table."""
     try:
         # SQL query to remove the keyword
         delete_sql = '''
-            DELETE FROM directory_keywords
+            DELETE FROM relevant_keywords
             WHERE keyword = %s
         '''
 
@@ -192,14 +185,13 @@ def remove_directory_keyword_from_db(cur, keyword):
         if cur.rowcount == 0:
             raise Exception(f"Keyword '{keyword}' does not exist.")
 
-        logging.info(f"Successfully removed directory keyword: {keyword}")
+        logging.info(f"Successfully removed relevant keyword: {keyword}")
         return True  # Indicate success
 
     except Exception as e:
         cur.connection.rollback()  # Rollback using the cursor's connection
-        logging.error(f"Error removing directory keyword '{keyword}': {str(e)}")
+        logging.error(f"Error removing relevant keyword '{keyword}': {str(e)}")
         raise  # Reraise the exception for handling in the calling code
-
     finally:
         # Simply attempt to close the cursor, without checking `cur.closed`
         try:
@@ -207,8 +199,6 @@ def remove_directory_keyword_from_db(cur, keyword):
             logging.info(f"Cursor for keyword '{keyword}' closed successfully.")
         except Exception as cursor_error:
             logging.warning(f"Error closing cursor: {str(cursor_error)}")
-
-
 
 
 def create_tables():
@@ -233,17 +223,16 @@ def create_tables():
                 )
             ''')
 
-            # SQL to create the directory_keywords table if it doesn't exist
+            # SQL to create the relevant_keywords table if it doesn't exist
             cur.execute('''
-                CREATE TABLE IF NOT EXISTS directory_keywords (
+                CREATE TABLE IF NOT EXISTS relevant_keywords (
                     id SERIAL PRIMARY KEY,
-                    keyword TEXT NOT NULL,
-                    tender_type TEXT NOT NULL  -- Link to tender_type
+                    keyword TEXT NOT NULL
                 )
             ''')
 
             conn.commit()
-            logging.info("Tenders and directory_keywords tables created or already exist.")
+            logging.info("Tenders and relevant_keywords tables created or already exist.")
 
     except Exception as e:
         logging.error("Error creating tables: %s", str(e))

@@ -1,138 +1,230 @@
-from flask import Blueprint, request, jsonify
-from webapp.config import get_db_connection
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required
 from webapp.cache.redis_cache import set_cache, get_cache, delete_cache
-import logging
-from datetime import datetime  # Ensure you import datetime if not already
+from webapp.config import get_db_connection
+from datetime import datetime
 
-# Create a Blueprint for closing keywords management
 closing_keywords_bp = Blueprint('closing_keywords_bp', __name__)
 
-# Get All Closing Keywords
+# Cache key for closing keywords
+CACHE_KEY = 'closing_keywords_list'
+
+def serialize_keyword(keyword):
+    """
+    Helper function to convert keyword dictionary for JSON serialization.
+    """
+    return {
+        'id': keyword['id'],
+        'keyword': keyword['keyword'],
+        'created_at': keyword['created_at'].strftime('%a, %d %b %Y %H:%M:%S GMT') if isinstance(keyword['created_at'], datetime) else keyword['created_at']
+    }
+
 @closing_keywords_bp.route('/api/closing_keywords', methods=['GET'])
 @jwt_required()
-def get_closing_keywords():
+def get_keywords():
     """
     Fetch all closing keywords from the cache or database.
     """
-    cache_key = 'closing_keywords'
-    keywords = get_cache(cache_key)
+    cached_keywords = get_cache(CACHE_KEY)
+    if cached_keywords:
+        current_app.logger.info("Serving closing keywords from cache.")
+        return jsonify(cached_keywords), 200
 
-    if keywords is not None:
-        logging.info("Serving closing keywords from cache.")
-        return jsonify(keywords), 200
-
-    db_connection = get_db_connection()
+    conn = get_db_connection()
+    cursor = conn.cursor()
     try:
-        cur = db_connection.cursor()
-        cur.execute("SELECT keyword, created_at FROM closing_keywords;")
+        cursor.execute("SELECT id, keyword, created_at FROM closing_keywords")
+        keywords = cursor.fetchall()
 
-        # Assuming created_at is a datetime object, convert it to a string
-        keywords = [{
-            "keyword": row[0],
-            "created_at": row[1].strftime("%a, %d %b %Y %H:%M:%S GMT") if row[1] else None  # Format datetime to the specified string
-        } for row in cur.fetchall()]
-        cur.close()
+        keyword_list = [{'id': row[0], 'keyword': row[1], 'created_at': row[2]} for row in keywords]
 
-        # Cache the results
-        set_cache(cache_key, keywords)
-        logging.info("Closing keywords fetched from database and cached.")
+        if not keyword_list:
+            return jsonify([]), 200
 
-        return jsonify(keywords), 200
+        serialized_keywords = [serialize_keyword(keyword) for keyword in keyword_list]
+
+        set_cache(CACHE_KEY, serialized_keywords)
+        current_app.logger.info("Closing keywords fetched from database and cached.")
+
+        return jsonify(serialized_keywords), 200
     except Exception as e:
-        logging.error(f"Error retrieving closing keywords: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        current_app.logger.error(f"Error retrieving closing keywords: {str(e)}")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
     finally:
-        db_connection.close()
+        cursor.close()
+        conn.close()
 
-# Create a New Closing Keyword
 @closing_keywords_bp.route('/api/closing_keywords', methods=['POST'])
 @jwt_required()
-def create_closing_keyword():
+def create_keyword():
     """
     Create a new closing keyword.
     """
-    db_connection = get_db_connection()
-    data = request.json
-
+    data = request.get_json()
     if not data or 'keyword' not in data:
-        return jsonify({"error": "Keyword is required"}), 400
+        return jsonify({"msg": "Keyword is required"}), 400
 
     keyword = data['keyword']
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
     try:
-        cur = db_connection.cursor()
-        cur.execute("INSERT INTO closing_keywords (keyword) VALUES (%s)", (keyword,))
-        db_connection.commit()
-        cur.close()
+        # Insert the new keyword and return the new ID
+        cursor.execute(
+            "INSERT INTO closing_keywords (keyword, created_at) VALUES (%s, %s) RETURNING id, keyword, created_at",
+            (keyword, datetime.utcnow())
+        )
+        new_keyword = cursor.fetchone()
+        conn.commit()
 
-        # Invalidate the cache
-        delete_cache('closing_keywords')
-        logging.info("Cache invalidated after adding a new keyword.")
+        # Serialize the new keyword
+        new_keyword_data = {
+            'id': new_keyword[0],
+            'keyword': new_keyword[1],
+            'created_at': new_keyword[2].strftime('%a, %d %b %Y %H:%M:%S GMT')
+        }
 
-        return jsonify({"message": "Keyword added successfully"}), 201
+        # Clear the cache for closing keywords
+        delete_cache(CACHE_KEY)
+        current_app.logger.info("Cache invalidated after adding a new closing keyword.")
+
+        return jsonify({"msg": "Keyword created successfully", "keyword": new_keyword_data}), 201
     except Exception as e:
-        logging.error(f"Error adding keyword: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        conn.rollback()
+        current_app.logger.error(f"Error creating keyword: {str(e)}")
+        return jsonify({"msg": "Error creating keyword", "error": str(e)}), 500
     finally:
-        db_connection.close()
+        cursor.close()
+        conn.close()
 
-# Update an Existing Closing Keyword
-@closing_keywords_bp.route('/api/closing_keywords/<string:keyword>', methods=['PUT'])
+@closing_keywords_bp.route('/api/closing_keywords/<int:keyword_id>', methods=['PUT'])
 @jwt_required()
-def update_closing_keyword(keyword):
+def update_keyword(keyword_id):
     """
-    Update an existing closing keyword.
+    Update an existing closing keyword by ID.
     """
-    db_connection = get_db_connection()
-    data = request.json
+    current_app.logger.info(f"Received PUT request to /api/closing_keywords/{keyword_id}")
+    current_app.logger.info(f"Request headers: {request.headers}")
+    current_app.logger.info(f"Request body (raw): {request.get_data(as_text=True)}")
+    data = request.get_json(silent=True)  # Use silent=True to avoid raising an error
+    current_app.logger.info(f"Parsed JSON body: {data}")
 
-    if not data or 'new_keyword' not in data:
-        return jsonify({"error": "New keyword is required"}), 400
+    if not data or 'keyword' not in data:
+        current_app.logger.error("Keyword field missing in request body")
+        return jsonify({"msg": "Keyword is required"}), 400
 
-    new_keyword = data['new_keyword']
-    logging.info(f"Updating closing keyword from '{keyword}' to '{new_keyword}'.")
+    new_keyword = data['keyword']
+    if not new_keyword.strip():
+        current_app.logger.error("Keyword field is empty or contains only whitespace")
+        return jsonify({"msg": "Keyword cannot be empty"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
     try:
-        cur = db_connection.cursor()
-        cur.execute("UPDATE closing_keywords SET keyword = %s WHERE keyword = %s", (new_keyword, keyword))
-        db_connection.commit()
-        if cur.rowcount == 0:
-            return jsonify({"error": "Keyword not found"}), 404
+        # Check if the keyword exists
+        cursor.execute("SELECT * FROM closing_keywords WHERE id = %s", (keyword_id,))
+        keyword = cursor.fetchone()
 
-        # Invalidate cache
-        delete_cache('closing_keywords')
-        logging.info("Cache invalidated after updating a closing keyword.")
+        if keyword is None:
+            return jsonify({"msg": "Keyword not found"}), 404
 
-        return jsonify({"message": "Closing keyword updated successfully"}), 200
+        # Update the keyword
+        cursor.execute(
+            "UPDATE closing_keywords SET keyword = %s WHERE id = %s",
+            (new_keyword, keyword_id)
+        )
+        conn.commit()
+
+        # Clear cache
+        delete_cache(CACHE_KEY)
+        current_app.logger.info("Cache invalidated after updating a closing keyword.")
+
+        return jsonify({"msg": "Keyword updated successfully"}), 200
     except Exception as e:
-        logging.error(f"Error updating closing keyword: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        conn.rollback()
+        current_app.logger.error(f"Error updating keyword: {str(e)}")
+        return jsonify({"msg": "Error updating keyword", "error": str(e)}), 500
     finally:
-        db_connection.close()
+        cursor.close()
+        conn.close()
 
-# Delete a Closing Keyword
-@closing_keywords_bp.route('/api/closing_keywords/<string:keyword>', methods=['DELETE'])
+@closing_keywords_bp.route('/api/closing_keywords/<int:keyword_id>', methods=['DELETE'])
 @jwt_required()
-def delete_closing_keyword(keyword):
+def delete_keyword(keyword_id):
     """
-    Delete a closing keyword.
+    Delete a closing keyword by ID.
     """
-    db_connection = get_db_connection()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
     try:
-        cur = db_connection.cursor()
-        cur.execute("DELETE FROM closing_keywords WHERE keyword = %s", (keyword,))
-        if cur.rowcount == 0:
-            return jsonify({"error": "Keyword not found"}), 404
-        db_connection.commit()
-        cur.close()
+        # Check if the keyword exists
+        cursor.execute("SELECT * FROM closing_keywords WHERE id = %s", (keyword_id,))
+        keyword = cursor.fetchone()
 
-        # Invalidate the cache
-        delete_cache('closing_keywords')
-        logging.info("Cache invalidated after deleting a keyword.")
+        if keyword is None:
+            return jsonify({"msg": "Keyword not found"}), 404
 
-        return jsonify({"message": "Keyword deleted successfully"}), 200
+        # Delete the keyword
+        cursor.execute("DELETE FROM closing_keywords WHERE id = %s", (keyword_id,))
+        conn.commit()
+
+        # Clear cache
+        delete_cache(CACHE_KEY)
+        current_app.logger.info("Cache invalidated after deleting a closing keyword.")
+
+        return jsonify({"msg": "Keyword deleted successfully"}), 200
     except Exception as e:
-        logging.error(f"Error deleting keyword: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        conn.rollback()
+        current_app.logger.error(f"Error deleting keyword: {str(e)}")
+        return jsonify({"msg": "Error deleting keyword", "error": str(e)}), 500
     finally:
-        db_connection.close()
+        cursor.close()
+        conn.close()
+
+@closing_keywords_bp.route('/api/closing_keywords', methods=['DELETE'])
+@jwt_required()
+def delete_multiple_keywords():
+    """
+    Delete multiple closing keywords by their IDs.
+    """
+    data = request.get_json()
+    if not data or 'ids' not in data:
+        return jsonify({"msg": "IDs are required"}), 400
+
+    ids = data['ids']
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"msg": "A non-empty list of IDs is required"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        # Create placeholders for the IN clause (e.g., %s, %s, %s)
+        placeholders = ', '.join(['%s'] * len(ids))
+        # Check if all IDs exist
+        query = f"SELECT id FROM closing_keywords WHERE id IN ({placeholders})"
+        cursor.execute(query, ids)
+        existing_ids = [row[0] for row in cursor.fetchall()]
+        missing_ids = set(ids) - set(existing_ids)
+
+        if missing_ids:
+            return jsonify({"msg": f"Keywords with IDs {missing_ids} not found"}), 404
+
+        # Delete the keywords
+        delete_query = f"DELETE FROM closing_keywords WHERE id IN ({placeholders})"
+        cursor.execute(delete_query, ids)
+        conn.commit()
+
+        delete_cache(CACHE_KEY)
+        current_app.logger.info(f"Cache invalidated after deleting {len(ids)} closing keywords.")
+
+        return jsonify({"msg": f"Deleted {len(ids)} keywords successfully"}), 200
+    except Exception as e:
+        conn.rollback()
+        current_app.logger.error(f"Error deleting multiple keywords: {str(e)}")
+        return jsonify({"msg": "Error deleting keywords", "error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()

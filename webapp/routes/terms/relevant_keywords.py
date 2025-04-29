@@ -4,10 +4,10 @@ from webapp.cache.redis_cache import set_cache, get_cache, delete_cache
 from webapp.config import get_db_connection
 from datetime import datetime
 
-base_keywords_bp = Blueprint('base_keywords_bp', __name__)
+relevant_keywords_bp = Blueprint('relevant_keywords_bp', __name__)
 
-# Cache key for base keywords
-CACHE_KEY = 'base_keywords_list'
+# Cache key for relevant keywords
+CACHE_KEY = 'relevant_keywords_list'
 
 def serialize_keyword(keyword):
     return {
@@ -16,18 +16,18 @@ def serialize_keyword(keyword):
         'created_at': keyword['created_at'].strftime('%a, %d %b %Y %H:%M:%S GMT') if isinstance(keyword['created_at'], datetime) else keyword['created_at']
     }
 
-@base_keywords_bp.route('/api/base_keywords', methods=['GET'])
+@relevant_keywords_bp.route('/api/relevant_keywords', methods=['GET'])
 @jwt_required()
 def get_keywords():
     cached_keywords = get_cache(CACHE_KEY)
     if cached_keywords:
-        current_app.logger.info("Serving base keywords from cache.")
+        current_app.logger.info("Serving relevant keywords from cache.")
         return jsonify(cached_keywords), 200
 
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT id, keyword, created_at FROM base_keywords")
+        cursor.execute("SELECT id, keyword, created_at FROM relevant_keywords")
         keywords = cursor.fetchall()
 
         keyword_list = [{'id': row[0], 'keyword': row[1], 'created_at': row[2]} for row in keywords]
@@ -38,17 +38,17 @@ def get_keywords():
         serialized_keywords = [serialize_keyword(keyword) for keyword in keyword_list]
 
         set_cache(CACHE_KEY, serialized_keywords)
-        current_app.logger.info("Base keywords fetched from database and cached.")
+        current_app.logger.info("Relevant keywords fetched from database and cached.")
 
         return jsonify(serialized_keywords), 200
     except Exception as e:
-        current_app.logger.error(f"Error retrieving base keywords: {str(e)}")
+        current_app.logger.error(f"Error retrieving relevant keywords: {str(e)}")
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
     finally:
         cursor.close()
         conn.close()
 
-@base_keywords_bp.route('/api/base_keywords', methods=['POST'])
+@relevant_keywords_bp.route('/api/relevant_keywords', methods=['POST'])
 @jwt_required()
 def create_keyword():
     data = request.get_json()
@@ -61,7 +61,7 @@ def create_keyword():
 
     try:
         cursor.execute(
-            "INSERT INTO base_keywords (keyword, created_at) VALUES (%s, %s) RETURNING id, keyword, created_at",
+            "INSERT INTO relevant_keywords (keyword, created_at) VALUES (%s, %s) RETURNING id, keyword, created_at",
             (keyword, datetime.utcnow())
         )
         new_keyword = cursor.fetchone()
@@ -75,7 +75,7 @@ def create_keyword():
         }
 
         delete_cache(CACHE_KEY)
-        current_app.logger.info("Cache invalidated after adding a new base keyword.")
+        current_app.logger.info("Cache invalidated after adding a new relevant keyword.")
 
         return jsonify({"msg": "Keyword created successfully", "keyword": new_keyword_data}), 201
     except Exception as e:
@@ -86,7 +86,7 @@ def create_keyword():
         cursor.close()
         conn.close()
 
-@base_keywords_bp.route('/api/base_keywords/<int:keyword_id>', methods=['PUT'])
+@relevant_keywords_bp.route('/api/relevant_keywords/<int:keyword_id>', methods=['PUT'])
 @jwt_required()
 def update_keyword(keyword_id):
     data = request.get_json()
@@ -101,20 +101,20 @@ def update_keyword(keyword_id):
     cursor = conn.cursor()
 
     try:
-        cursor.execute("SELECT * FROM base_keywords WHERE id = %s", (keyword_id,))
+        cursor.execute("SELECT * FROM relevant_keywords WHERE id = %s", (keyword_id,))
         keyword = cursor.fetchone()
 
         if keyword is None:
             return jsonify({"msg": "Keyword not found"}), 404
 
         cursor.execute(
-            "UPDATE base_keywords SET keyword = %s WHERE id = %s",
+            "UPDATE relevant_keywords SET keyword = %s WHERE id = %s",
             (new_keyword, keyword_id)
         )
         conn.commit()
 
         delete_cache(CACHE_KEY)
-        current_app.logger.info("Cache invalidated after updating a base keyword.")
+        current_app.logger.info("Cache invalidated after updating a relevant keyword.")
 
         return jsonify({"msg": "Keyword updated successfully"}), 200
     except Exception as e:
@@ -125,24 +125,24 @@ def update_keyword(keyword_id):
         cursor.close()
         conn.close()
 
-@base_keywords_bp.route('/api/base_keywords/<int:keyword_id>', methods=['DELETE'])
+@relevant_keywords_bp.route('/api/relevant_keywords/<int:keyword_id>', methods=['DELETE'])
 @jwt_required()
 def delete_keyword(keyword_id):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
-        cursor.execute("SELECT * FROM base_keywords WHERE id = %s", (keyword_id,))
+        cursor.execute("SELECT * FROM relevant_keywords WHERE id = %s", (keyword_id,))
         keyword = cursor.fetchone()
 
         if keyword is None:
             return jsonify({"msg": "Keyword not found"}), 404
 
-        cursor.execute("DELETE FROM base_keywords WHERE id = %s", (keyword_id,))
+        cursor.execute("DELETE FROM relevant_keywords WHERE id = %s", (keyword_id,))
         conn.commit()
 
         delete_cache(CACHE_KEY)
-        current_app.logger.info("Cache invalidated after deleting a base keyword.")
+        current_app.logger.info("Cache invalidated after deleting a relevant keyword.")
 
         return jsonify({"msg": "Keyword deleted successfully"}), 200
     except Exception as e:
@@ -153,7 +153,7 @@ def delete_keyword(keyword_id):
         cursor.close()
         conn.close()
 
-@base_keywords_bp.route('/api/base_keywords', methods=['DELETE'])
+@relevant_keywords_bp.route('/api/relevant_keywords', methods=['DELETE'])
 @jwt_required()
 def delete_multiple_keywords():
     data = request.get_json()
@@ -171,7 +171,7 @@ def delete_multiple_keywords():
         # Create placeholders for the IN clause (e.g., %s, %s, %s)
         placeholders = ', '.join(['%s'] * len(ids))
         # Check if all IDs exist
-        query = f"SELECT id FROM base_keywords WHERE id IN ({placeholders})"
+        query = f"SELECT id FROM relevant_keywords WHERE id IN ({placeholders})"
         cursor.execute(query, ids)
         existing_ids = [row[0] for row in cursor.fetchall()]
         missing_ids = set(ids) - set(existing_ids)
@@ -180,12 +180,12 @@ def delete_multiple_keywords():
             return jsonify({"msg": f"Keywords with IDs {missing_ids} not found"}), 404
 
         # Delete the keywords
-        delete_query = f"DELETE FROM base_keywords WHERE id IN ({placeholders})"
+        delete_query = f"DELETE FROM relevant_keywords WHERE id IN ({placeholders})"
         cursor.execute(delete_query, ids)
         conn.commit()
 
         delete_cache(CACHE_KEY)
-        current_app.logger.info(f"Cache invalidated after deleting {len(ids)} base keywords.")
+        current_app.logger.info(f"Cache invalidated after deleting {len(ids)} relevant keywords.")
 
         return jsonify({"msg": f"Deleted {len(ids)} keywords successfully"}), 200
     except Exception as e:

@@ -1,15 +1,16 @@
 import re
 import time
-from datetime import datetime
+from datetime import datetime, date
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+import uuid
 from webapp.config import get_db_connection
 from webapp.routes.tenders.tender_utils import insert_tender_to_db
-from webapp.db.db import get_directory_keywords
+from webapp.db.db import get_relevant_keywords
 import logging
 
 # Configure Python logging
@@ -25,7 +26,7 @@ def get_format(url):
         return 'PDF'
     elif url.lower().endswith('.docx'):
         return 'DOCX'
-    return 'HTML'  # Default to HTML if no specific format is found
+    return 'HTML'
 
 def extract_deadline_date(tender):
     """Extract the deadline date from the tender element."""
@@ -54,7 +55,6 @@ def ensure_db_connection():
         if db_connection is None:
             logging.error("Database connection is None. Reconnecting...")
             return None
-
         cursor = db_connection.cursor()
         cursor.execute("SELECT 1")
         cursor.close()
@@ -145,7 +145,16 @@ def select_beneficiary_country(driver, country):
         logging.error(f"Failed to select {country} from the dropdown: {str(e)}")
         return None
 
-def scrape_ungm_tenders():
+def make_tender_serializable(tender):
+    """Convert non-serializable fields in a tender dictionary to serializable formats."""
+    serializable_tender = tender.copy()
+    if 'closing_date' in serializable_tender and isinstance(serializable_tender['closing_date'], date):
+        serializable_tender['closing_date'] = serializable_tender['closing_date'].isoformat()
+    if 'scraped_at' in serializable_tender and isinstance(serializable_tender['scraped_at'], date):
+        serializable_tender['scraped_at'] = serializable_tender['scraped_at'].isoformat()
+    return serializable_tender
+
+def scrape_ungm_tenders(scraping_task_id=None, set_task_state=None, socketio=None):
     """Scrapes tenders from UNGM."""
     url = "https://www.ungm.org/Public/Notice"
     driver = None
@@ -162,16 +171,73 @@ def scrape_ungm_tenders():
         "Tanzania": "2507",
     }
 
+    # Generate a scraping_task_id if not provided (for standalone execution)
+    scraping_task_id = scraping_task_id or str(uuid.uuid4())
+    start_time = datetime.now().isoformat()
+
+    # Initialize task state
+    set_task_state(scraping_task_id, {
+        "status": "running",
+        "startTime": start_time,
+        "tenders": [],
+        "visited_urls": [url],
+        "total_urls": 1,
+        "summary": {}
+    })
+    socketio.emit('scrape_update', {
+        'taskId': scraping_task_id,
+        'status': 'running',
+        'startTime': start_time,
+        'tenders': [],
+        'visitedUrls': [url],
+        'totalUrls': 1,
+        'message': "Started scraping UNGM tenders"
+    }, namespace='/scraping')
+
+    tenders = []
+    open_tenders = 0
+    closed_tenders = 0
+    visited_urls = [url]
+
     try:
         db_connection = ensure_db_connection()
         if not db_connection:
             logging.error("Failed to establish a database connection.")
-            return
+            set_task_state(scraping_task_id, {
+                "status": "error",
+                "startTime": start_time,
+                "tenders": [],
+                "visited_urls": visited_urls,
+                "total_urls": len(visited_urls),
+                "summary": {}
+            })
+            socketio.emit('scrape_update', {
+                'taskId': scraping_task_id,
+                'status': 'error',
+                'startTime': start_time,
+                'message': "Failed to establish database connection"
+            }, namespace='/scraping')
+            return tenders  # Return empty tenders list
 
-        keywords = get_directory_keywords(db_connection, 'UNGM')
+        keywords = get_relevant_keywords(db_connection)
         if not keywords:
             logging.error("No keywords found for 'UNGM'. Aborting scrape.")
-            return
+            set_task_state(scraping_task_id, {
+                "status": "error",
+                "startTime": start_time,
+                "tenders": [],
+                "visited_urls": visited_urls,
+                "total_urls": len(visited_urls),
+                "summary": {}
+            })
+            socketio.emit('scrape_update', {
+                'taskId': scraping_task_id,
+                'status': 'error',
+                'startTime': start_time,
+                'message': "No keywords found for 'UNGM'"
+            }, namespace='/scraping')
+            return tenders  # Return empty tenders list
+
         keywords = [keyword.lower() for keyword in keywords]
 
         driver = setup_selenium_driver()
@@ -208,13 +274,13 @@ def scrape_ungm_tenders():
             page_source = driver.page_source
             soup = BeautifulSoup(page_source, 'html.parser')
 
-            tenders = soup.find_all('div', class_='tableRow dataRow notice-table')
-            total_dynamic_tenders = len(tenders)
+            tender_elements = soup.find_all('div', class_='tableRow dataRow notice-table')
+            total_dynamic_tenders = len(tender_elements)
             logging.info(f"Total tenders after dynamic load for {country}: {total_dynamic_tenders}")
 
             found_for_keyword = 0
 
-            for tender in tenders:
+            for tender in tender_elements:
                 title_elem = tender.find('div', class_='resultTitle')
                 title = title_elem.get_text(strip=True) if title_elem else ""
 
@@ -222,16 +288,22 @@ def scrape_ungm_tenders():
                 tender_link = title_elem.find('a', href=True)
                 if tender_link and "href" in tender_link.attrs:
                     href = tender_link['href']
-                    source_url = f"https://www.ungm.org{href}"  # Construct the full URL
+                    source_url = f"https://www.ungm.org{href}"
+                    if source_url not in visited_urls:
+                        visited_urls.append(source_url)
                 else:
                     logging.warning(f"No valid link found for tender titled: {title} ({country})")
-                    continue  # Skip if no valid link is present
+                    continue
 
                 deadline_date = extract_deadline_date(tender)
                 if not deadline_date:
                     continue
 
                 status = "open" if deadline_date > datetime.now().date() else "closed"
+                if status == "open":
+                    open_tenders += 1
+                else:
+                    closed_tenders += 1
                 format_type = get_format(source_url)
 
                 tender_data = {
@@ -243,26 +315,61 @@ def scrape_ungm_tenders():
                     'format': format_type,
                     'scraped_at': datetime.now().date(),
                     'tender_type': "UNGM",
+                    'location': country,
                 }
 
                 if any(keyword in title.lower() for keyword in keywords):
                     found_for_keyword += 1
+                    tenders.append(tender_data)
                     try:
                         # Attempt to execute an insert, reconnecting if there's an issue
                         if db_connection is None:
                             logging.warning("Database connection is None. Attempting to reconnect...")
-                            db_connection = ensure_db_connection()  # Reopen connection
+                            db_connection = ensure_db_connection()
 
                         insert_tender_to_db(tender_data, db_connection)
                         logging.info(f"Inserted tender from {country}: {title} | Source URL: {source_url}")
 
+                        # Create a serializable version of tenders for Redis and Socket.IO
+                        serializable_tenders = [make_tender_serializable(t) for t in tenders]
+
+                        # Emit an update with the current state
+                        set_task_state(scraping_task_id, {
+                            "status": "running",
+                            "startTime": start_time,
+                            "tenders": serializable_tenders,
+                            "visited_urls": visited_urls,
+                            "total_urls": len(visited_urls),
+                            "summary": {
+                                "urlsVisited": len(visited_urls),
+                                "openTenders": open_tenders,
+                                "closedTenders": closed_tenders,
+                                "totalTenders": len(tenders)
+                            }
+                        })
+                        socketio.emit('scrape_update', {
+                            'taskId': scraping_task_id,
+                            'status': 'running',
+                            'startTime': start_time,
+                            'tenders': serializable_tenders,
+                            'visitedUrls': visited_urls,
+                            'totalUrls': len(visited_urls),
+                            'summary': {
+                                "urlsVisited": len(visited_urls),
+                                "openTenders": open_tenders,
+                                "closedTenders": closed_tenders,
+                                "totalTenders": len(tenders)
+                            },
+                            'message': f"Processed tender: {title} ({country})"
+                        }, namespace='/scraping')
+
                     except Exception as e:
                         logging.error(f"Error inserting tender '{title}' from {country} into database: {e}")
                         # Attempt to reconnect & retry insert
-                        db_connection = ensure_db_connection()  # Attempt to re-establish connection
+                        db_connection = ensure_db_connection()
                         if db_connection:
                             try:
-                                insert_tender_to_db(tender_data, db_connection)  # Retry insert
+                                insert_tender_to_db(tender_data, db_connection)
                                 logging.info(f"Reinserted tender from {country}: {title} | Source URL: {source_url}")
                             except Exception as retry_exception:
                                 logging.error(f"Error reinserting tender '{title}' from {country}: {retry_exception}")
@@ -270,8 +377,80 @@ def scrape_ungm_tenders():
             logging.info(f"{found_for_keyword} tenders found for the specified keywords from {country}.")
             logging.info(f"{country} tender scraping completed.")
 
+        # Calculate time taken
+        time_taken = (datetime.now() - datetime.fromisoformat(start_time)).total_seconds()
+
+        # Create a serializable version of tenders for the final state
+        serializable_tenders = [make_tender_serializable(t) for t in tenders]
+
+        # Emit completion event
+        set_task_state(scraping_task_id, {
+            "status": "complete",
+            "startTime": start_time,
+            "tenders": serializable_tenders,
+            "visited_urls": visited_urls,
+            "total_urls": len(visited_urls),
+            "summary": {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": time_taken,
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            }
+        })
+        socketio.emit('scrape_update', {
+            'taskId': scraping_task_id,
+            'status': 'complete',
+            'startTime': start_time,
+            'tenders': serializable_tenders,
+            'visitedUrls': visited_urls,
+            'totalUrls': len(visited_urls),
+            'summary': {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": time_taken,
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            },
+            'message': "Completed scraping UNGM tenders"
+        }, namespace='/scraping')
+
+        return tenders  # Return tenders on successful completion
+
     except Exception as e:
         logging.error(f"Fatal error during scraping: {str(e)}")
+        serializable_tenders = [make_tender_serializable(t) for t in tenders]
+        set_task_state(scraping_task_id, {
+            "status": "error",
+            "startTime": start_time,
+            "tenders": serializable_tenders,
+            "visited_urls": visited_urls,
+            "total_urls": len(visited_urls),
+            "summary": {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": (datetime.now() - datetime.fromisoformat(start_time)).total_seconds(),
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            }
+        })
+        socketio.emit('scrape_update', {
+            'taskId': scraping_task_id,
+            'status': 'error',
+            'startTime': start_time,
+            'tenders': serializable_tenders,
+            'visitedUrls': visited_urls,
+            'totalUrls': len(visited_urls),
+            'summary': {
+                "urlsVisited": len(visited_urls),
+                "timeTaken": (datetime.now() - datetime.fromisoformat(start_time)).total_seconds(),
+                "openTenders": open_tenders,
+                "closedTenders": closed_tenders,
+                "totalTenders": len(tenders)
+            },
+            'message': f"Error scraping UNGM tenders: {str(e)}"
+        }, namespace='/scraping')
+        return tenders  # Return tenders collected so far
     finally:
         if driver:
             driver.quit()
@@ -280,6 +459,7 @@ def scrape_ungm_tenders():
 
 if __name__ == "__main__":
     try:
-        scrape_ungm_tenders()
+        tenders = scrape_ungm_tenders()
+        logging.info(f"Scraped {len(tenders)} tenders")
     except Exception as e:
         logging.error(f"Script failed with error: {str(e)}")

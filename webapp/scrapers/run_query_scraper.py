@@ -1,378 +1,558 @@
-from webapp.config import get_db_connection  # Import function to establish database connection
-import requests  # For making HTTP requests to scrape data
-from bs4 import BeautifulSoup  # For parsing HTML content
-from datetime import datetime  # For handling date and time
-from webapp.db import insert_tender_to_db, get_keywords_and_terms  # Import database utilities
+import time
+import random
+import base64
+from urllib.parse import urljoin, parse_qs, unquote, urlparse, quote
+from bs4 import BeautifulSoup
+import requests
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from webapp.routes.tenders.tender_utils import (
-    extract_closing_dates,
-    parse_closing_date,
-    get_format,
-    extract_pdf_text,
-    extract_docx_text,
-    construct_search_url,
-    extract_description_from_response,
-    is_relevant_tender
+    is_valid_url, get_format, construct_search_url, extract_description_from_response,
+    extract_closing_dates, parse_closing_date, is_relevant_tender, insert_tender_to_db,
+    extract_pdf_text, extract_docx_text, fetch_relevant_keywords
 )
-from urllib.parse import urlparse  # Import this to parse URLs
-import urllib.parse  # Import this to parse URLs
-import random  # For generating random delays
-import time  # For adding sleep delays between requests
-import re  # For regular expression operations
-# from webapp.extensions import socketio  # Import your SocketIO instance here
-from webapp.services.log import ScrapingLog  # Import your custom logging class
-
-# List of common user agents to simulate different browsers
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:58.0) Gecko/20100101 Firefox/58.0',
-    'Mozilla/5.0 (Linux; Android 6.0; Nexus 6 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Mobile Safari/537.36',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 10_0 like Mac OS X) AppleWebKit/602.1.50 (KHTML, like Gecko) Version/10.0 Mobile/14E277 Safari/602.1',
-]
-
-# Mapping of supported search engines
-SEARCH_ENGINES = [
-    "Google",
-    "Bing",
-    "Yahoo",
-    "DuckDuckGo",
-    "Ask"
-]
-# Exponential backoff configuration
-MAX_RETRIES = 5
-BACKOFF_FACTOR = 2  # Experiment with this to suit your needs
-
-def scrape_tenders(db_connection, query, search_engines):
-    """
-    Scrapes tenders from specified search engines using a constructed query.
-
-    Args:
-        db_connection: The active database connection object.
-        query (str): The constructed search query.
-        search_engines (list): A list of selected search engines for scraping.
-
-    Returns:
-        list: A list of tender information dictionaries scraped from the web.
-    """
-    tenders = []  # Initialize a list to hold scraped tender data
-    excluded_domains = [
-        "microsoft.com", "go.microsoft.com", "privacy.microsoft.com",
-        "support.microsoft.com", "about.ads.microsoft.com",
-        "aka.ms", "yahoo.com", "search.yahoo.com",
-        "duckduckgo.com", "ask.com", "bing.com", "youtube.com",
-        "investopedia.com", "help.yahoo.com", "google.com",
-    ]
-    
-
-    # Make sure to capture the total number of search engines for progress reporting
-    total_steps = len(search_engines)
-    ScrapingLog.add_log("Starting tender scraping...")
-
-    for i, engine in enumerate(search_engines):
-        search_url = construct_search_url(engine, query)
-        ScrapingLog.add_log(f"Constructed Search URL for engine '{engine}': {search_url}")
-
-        for attempt in range(MAX_RETRIES):
-            headers = {
-                "User-Agent": random.choice(USER_AGENTS),
-            }
-            time.sleep(random.uniform(3, 10))
-
-            try:
-                response = requests.get(search_url, headers=headers)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.content, 'html.parser')
-
-                links = soup.find_all('a', href=True)
-                for link in links:
-                    href = link['href']
-
-                    # Specific handling for Yahoo links
-                    if engine == "Yahoo" and 'url=' in href:
-                        actual_url = re.search(r'url=([^&]+)', href)
-                        if actual_url:
-                            actual_url = urllib.parse.unquote(actual_url.group(1))
-                        else:
-                            ScrapingLog.add_log(f"Skipping invalid URL: {href}")
-                            continue
-                    else:
-                        actual_url = extract_actual_link_from_search_result(href, engine)
-
-                    # Skip invalid URLs
-                    if not is_valid_url(href):
-                        # ScrapingLog.add_log(f"Skipping invalid URL: {href}")
-                        continue
-
-                    actual_url = extract_actual_link_from_search_result(href, engine)
-
-                    # Check against excluded domains
-                    if actual_url is None or is_excluded_domains(actual_url, excluded_domains):
-                        continue
-
-                    # Check if the actual URL is valid before visiting
-                    if is_valid_url(actual_url):
-                        ScrapingLog.add_log(f"Visiting URL: {actual_url}")
-                        tender_details = scrape_tender_details(actual_url, link.text.strip(), headers, db_connection)
-                        if tender_details:
-                            tenders.append(tender_details)
-
-                # Update progress
-                progress = ((i + 1) / total_steps) * 100
-                ScrapingLog.add_log(f'Emitting progress: {progress}%')
-
-            except requests.exceptions.HTTPError as http_err:
-                ScrapingLog.add_log(f"Error scraping {search_url}: {str(http_err)}")
-                if response.status_code == 429 and attempt < MAX_RETRIES - 1:
-                    wait_time = BACKOFF_FACTOR ** attempt
-                    ScrapingLog.add_log(f"429 Too Many Requests. Backing off for {wait_time} seconds.")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    break
-
-    ScrapingLog.add_log(f"Scraping completed. Total tenders found: {len(tenders)}")
-    return tenders
-
-def extract_actual_link_from_search_result(href, engine):
-    if engine in ['Google', 'Bing', 'Yahoo', 'DuckDuckGo', 'Ask']:
-        if href.startswith('/'):
-            base_url = {
-                "Google": "https://www.google.com",
-                "Bing": "https://www.bing.com",
-                "Yahoo": "https://search.yahoo.com",
-                "DuckDuckGo": "https://duckduckgo.com",
-                "Ask": "https://www.ask.com"
-            }[engine]
-            return urllib.parse.urljoin(base_url, href)
-        match = re.search(r'q=([^&]+)', href)
-        if match:
-            return urllib.parse.unquote(match.group(1))
-    return href
-
-def is_valid_url(url):
-    return url.startswith('http://') or url.startswith('https://')
+from webapp.services.log import ScrapingLog
+from datetime import datetime, date
+from webapp.extensions import socketio
+from webapp.task_service.utils import set_task_state, get_task_state, delete_task_state
+from webapp.scrapers.constants import SEARCH_ENGINES, USER_AGENTS, EXCLUDED_DOMAINS, DISABLE_SELENIUM
 
 def is_excluded_domains(url, excluded_domains):
-    """
-    Checks if the given URL belongs to any of the excluded domains.
+    return any(domain in url for domain in excluded_domains)
 
-    Args:
-        url (str): The URL to check.
-        excluded_domains (list): List of domains to exclude.
+def setup_selenium(use_proxy=False):
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    chrome_options = Options()
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
+    chrome_options.add_argument("--headless")
+    if use_proxy:
+        chrome_options.add_argument('--proxy-server=http://your-proxy:port')
+    driver = webdriver.Chrome(options=chrome_options)
+    return driver
 
-    Returns:
-        bool: True if the URL is from an excluded domain, False otherwise.
-    """
-    parsed_url = urlparse(url)  # Parse the URL
-    domain = parsed_url.netloc.lower()  # Get the domain in lowercase
-
-    # Check if the domain is in the list of excluded domains
-    return any(excluded_domain in domain for excluded_domain in excluded_domains)
-
-def log_scraping_details(db_connection, website_name, visiting_url, tenders_found,
-                         tender_title, closing_date, closing_keyword,
-                         filtered_keyword, is_relevant, status):
-    """
-    Logs the scraping details into the database, updating existing entries based on visiting_url.
-    """
-    try:
-        with db_connection.cursor() as cursor:
-            # Check if the visiting_url already exists in the table
-            check_query = """
-            SELECT id FROM scraping_log WHERE visiting_url = %s;
-            """
-            cursor.execute(check_query, (visiting_url,))
-            existing_record = cursor.fetchone()  # Fetch the existing record if it exists
-
-            if existing_record:
-                # If a record exists, update it
-                update_query = """
-                UPDATE scraping_log
-                SET website_name = %s, tenders_found = %s, tender_title = %s, closing_date = %s,
-                    closing_keyword = %s, filtered_keyword = %s, relevant = %s, status = %s, created_at = NOW()
-                WHERE visiting_url = %s;
-                """
-                cursor.execute(update_query, (website_name, tenders_found, tender_title, closing_date,
-                                              closing_keyword, filtered_keyword, is_relevant, status, visiting_url))
-                ScrapingLog.add_log(f"Updated existing record for visiting_url: {visiting_url}")
-            else:
-                # If no record exists, insert a new one
-                insert_query = """
-                INSERT INTO scraping_log (website_name, visiting_url, tenders_found, tender_title, closing_date,
-                                          closing_keyword, filtered_keyword, relevant, status, created_at) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW());
-                """
-                cursor.execute(insert_query, (website_name, visiting_url, tenders_found, tender_title, closing_date,
-                                              closing_keyword, filtered_keyword, is_relevant, status))
-                ScrapingLog.add_log(f"Inserted new record for visiting_url: {visiting_url}")
-
-            db_connection.commit()
-            ScrapingLog.add_log("Log entry successfully inserted/updated in scraping_log table.")
-
-    except Exception as e:
-        ScrapingLog.add_log(f"Error in logging tender details: {str(e)}")
-        if db_connection:
-            db_connection.rollback()  # Roll back if an error occurs
-
+def is_tender_related_url(url_to_check):
+    """Check if a URL is likely to be related to a tender"""
+    relevant_keywords = ['tender', 'rfp', 'procurement', 'bid', 'proposal', 'contract', 'eoi']
+    url_lower = url_to_check.lower()
+    return any(keyword in url_lower for keyword in relevant_keywords)
 
 def scrape_tender_details(url, title, headers, db_connection):
-    """
-    Scrapes the actual tender details from the specific URL.
+    def scrape_page_content(page_url, page_format, max_depth=1):
+        if max_depth < 0:
+            ScrapingLog.add_log(f"Max depth reached for {page_url}")
+            return None, None
 
-    Args:
-        url (str): The URL from which to scrape tender details.
-        title (str): The title of the tender extracted from the search results.
-        headers (dict): HTTP headers for the request.
-        db_connection: The active database connection object.
+        try:
+            response = requests.get(page_url, headers=headers, timeout=5)
+            response.raise_for_status()
 
-    Returns:
-        dict or None: A dictionary containing tender info if successful, else None.
-    """
-    time.sleep(random.uniform(1, 3))  # Random delay to mimic human browsing
-    description = ""  # Initialize description to ensure it's defined
+            if page_format == 'PDF':
+                content = extract_pdf_text(response.content)
+                ScrapingLog.add_log(f"Extracted PDF content from {page_url}, length: {len(content)}")
+                return content, []
+            elif page_format == 'DOC':
+                content = extract_docx_text(response.content)
+                ScrapingLog.add_log(f"Extracted DOC content from {page_url}, length: {len(content)}")
+                return content, []
+            else:
+                content = response.text
+                ScrapingLog.add_log(f"Extracted HTML content from {page_url}, length: {len(content)}")
 
-    # Extract the base domain name for logging (e.g., chrips.or.ke)
-    parsed_url = urlparse(url)
-    website_name = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                keywords = fetch_relevant_keywords(db_connection)
+                if not any(keyword.lower() in content.lower() for keyword in keywords):
+                    ScrapingLog.add_log(f"Page content doesn't appear to be tender-related: {page_url}")
+                    return content, []
 
-    # Default value for tender title
-    tender_title = title
+                soup = BeautifulSoup(content, 'html.parser')
+                links = soup.find_all('a', href=True)
 
-    ScrapingLog.add_log(f"Visiting URL: {url}")
+                sub_links = []
+                for link in links[:15]:
+                    href = link.get('href')
+                    if not href:
+                        ScrapingLog.add_log(f"Skipping link with no href: {link}")
+                        continue
+
+                    if href.startswith('#') or 'login' in href.lower() or 'contact' in href.lower() or 'about' in href.lower():
+                        continue
+
+                    sub_url = urljoin(page_url, href)
+
+                    if sub_url == page_url or urlparse(sub_url).netloc != urlparse(page_url).netloc:
+                        continue
+
+                    if is_valid_url(sub_url) and not is_excluded_domains(sub_url, EXCLUDED_DOMAINS):
+                        sub_format = get_format(sub_url)
+                        if sub_format in ['PDF', 'DOC']:
+                            sub_links.append((sub_url, sub_format))
+                        elif is_tender_related_url(sub_url):
+                            sub_links.append((sub_url, sub_format))
+
+                sub_links = sub_links[:3]
+                ScrapingLog.add_log(f"Found {len(sub_links)} relevant sublinks on {page_url}")
+                return content, sub_links
+
+        except Exception as e:
+            ScrapingLog.add_log(f"Error scraping page {page_url}: {str(e)}")
+            return None, []
 
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-
         format_type = get_format(url)
-        extracted_text = ""
-        closing_dates = []
+        ScrapingLog.add_log(f"========================================================\nScraping details from: {url}\nTender found: {title}")
+        content, sub_links = scrape_page_content(url, format_type)
 
-        # Fetching and processing closing dates based on format
-        if format_type == 'PDF':
-            extracted_text = extract_pdf_text(response.content)
-            closing_dates = extract_closing_dates(extracted_text, db_connection)
-        elif format_type == 'DOCX':
-            extracted_text = extract_docx_text(response.content)
-            closing_dates = extract_closing_dates(extracted_text, db_connection)
-        else:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            tender_title = (soup.find('h1') or soup.find('h2') or title).text.strip() if (soup.find('h1') or soup.find('h2')) else title
-            description = " ".join(p.text.strip() for p in soup.find_all('p')[:2]) if soup.find_all('p') else ""
-            extracted_text = f"{tender_title} {description}"
-            closing_dates = extract_closing_dates(extracted_text, db_connection)
+        if not content:
+            ScrapingLog.add_log(f"Failed to retrieve content from {url}\n========================================================\n")
+            return None, "error"
 
-        filtered_keyword = None
-        is_relevant = "No"
-        log_tenders_found = 0
-
+        closing_dates = extract_closing_dates(content, db_connection)
         if closing_dates:
-            for date, keyword in closing_dates:
-                ScrapingLog.add_log(f"Closing date for URL '{url}': {date}")
-                try:
-                    closing_date_parsed = parse_closing_date(date)
-                    filtered_keyword = is_relevant_tender(extracted_text, db_connection)
-
-                    if filtered_keyword:
-                        is_relevant = "Yes"
-
-                    tender_info = {
-                        'title': tender_title,
-                        'description': description,
-                        'closing_date': closing_date_parsed,
-                        'source_url': url,
-                        'status': "open" if closing_date_parsed > datetime.now().date() else "closed",
-                        'format': format_type,
-                        'scraped_at': datetime.now().date(),
-                        'tender_type': 'Query Tenders'
-                    }
-
-                    ScrapingLog.add_log("====================================")
-                    ScrapingLog.add_log("Found Tender")
-                    ScrapingLog.add_log(f"Tender Title: {tender_info['title']}")
-                    ScrapingLog.add_log(f"Closing Date: {closing_date_parsed}")
-                    ScrapingLog.add_log(f"Closing Date Keyword Found: {keyword}")
-                    ScrapingLog.add_log(f"Status: {tender_info['status']}")
-                    ScrapingLog.add_log(f"Tender Type: {tender_info['tender_type']}")
-                    ScrapingLog.add_log(f"Filtered Based on: {filtered_keyword}")
-                    ScrapingLog.add_log(f"Relevant Tender: {is_relevant}")
-                    ScrapingLog.add_log("====================================")
-
-                    log_tenders_found += 1
-
-                    # Prepare log details before logging
-                    log_status = tender_info['status']
-                    log_closing_keyword = keyword if keyword else 'None'
-                    log_filtered_keyword = filtered_keyword if filtered_keyword else 'None'
-                    log_is_relevant = is_relevant
-
-                    # Log the scraping details
-                    try:
-                        log_scraping_details(db_connection, website_name, url, log_tenders_found,
-                                             tender_info['title'], closing_date_parsed,
-                                             log_closing_keyword, log_filtered_keyword,
-                                             log_is_relevant, log_status)
-                    except Exception as log_error:
-                        ScrapingLog.add_log(f"Error occurred while logging details: {log_error}")
-
-                    # Insert the tender into the database only if relevant
-                    if is_relevant == "Yes":
-                        insertion_status = insert_tender_to_db(tender_info, db_connection)
-                        if insertion_status:
-                            ScrapingLog.add_log(f"Inserted into database: Success - {tender_info['title']}")
-                        else:
-                            ScrapingLog.add_log(f"Inserting into database: Failed - {tender_info['title']}")
-
-                except Exception as ve:
-                    ScrapingLog.add_log(f"Error processing closing date for tender from '{url}': {str(ve)}")
-
+            closing_date_str, keyword = closing_dates[0]
+            closing_date = parse_closing_date(closing_date_str)
+            if not closing_date:
+                ScrapingLog.add_log(f"Failed to parse closing date: {closing_date_str}\n========================================================\n")
+                return None, "parse_FAILED"
+            ScrapingLog.add_log(f"Found closing date: {closing_date_str}")
         else:
-            ScrapingLog.add_log(f"No closing dates found for URL: {url}")
+            ScrapingLog.add_log(f"No closing dates found on main page {url}, checking subpages")
+            for sub_url, sub_format in sub_links:
+                ScrapingLog.add_log(f"Checking subpage: {sub_url}")
+                sub_content, _ = scrape_page_content(sub_url, sub_format, max_depth=0)
+                if not sub_content:
+                    continue
+                sub_closing_dates = extract_closing_dates(sub_content, db_connection)
+                if sub_closing_dates:
+                    closing_date_str, keyword = sub_closing_dates[0]
+                    closing_date = parse_closing_date(closing_date_str)
+                    if closing_date:
+                        ScrapingLog.add_log(f"Found closing date on subpage {sub_url}: {closing_date_str}")
+                        url = sub_url
+                        format_type = sub_format
+                        content = sub_content
+                        break
+            else:
+                ScrapingLog.add_log(f"No closing dates found for {url} or its subpages\n========================================================\n")
+                return None, "no_date"
 
-    except requests.exceptions.HTTPError as http_err:
-        ScrapingLog.add_log(f"HTTP error while fetching `{url}`: {http_err}")
-    except requests.exceptions.ConnectionError as conn_err:
-        ScrapingLog.add_log(f"Connection error while trying to reach `{url}`: {conn_err}")
+        current_date = date.today()
+        status = "expired" if closing_date < current_date else "open"
+        if status == "expired":
+            ScrapingLog.add_log(f"Tender expired: Closing date {closing_date} is before current date {current_date}\n========================================================\n")
+
+        relevant, matched_keywords = is_relevant_tender(content, db_connection)
+        keywords = fetch_relevant_keywords(db_connection)
+        ScrapingLog.add_log(f"Relevant: {'Yes' if relevant else 'No'}, based on {'matched keywords: ' + str(matched_keywords) if relevant else 'keywords: ' + str(keywords)}")
+        if not relevant:
+            ScrapingLog.add_log(f"========================================================\n")
+            return None, "not_relevant"
+
+        response = requests.get(url, headers=headers, timeout=10)
+        description = extract_description_from_response(response, format_type)
+        tender_info = {
+            "title": title,
+            "description": description,
+            "closing_date": closing_date,
+            "source_url": url,
+            "status": status,
+            "scraped_at": datetime.now(),
+            "format": format_type,
+            "tender_type": "Search Query Tenders",
+            "location": "Kenya"
+        }
+
+        if insert_tender_to_db(tender_info, db_connection):
+            ScrapingLog.add_log(f"Tender stored in database: {title}\n========================================================\n")
+            return tender_info, status
+        else:
+            ScrapingLog.add_log(f"Failed to store tender in database: {title}\n========================================================\n")
+            return None, "db_FAILED"
+
     except Exception as e:
-        ScrapingLog.add_log(f"Error scraping details from `{url}`: {str(e)}")
+        ScrapingLog.add_log(f"Error scraping tender details from {url}: {str(e)}\n========================================================\n")
+        return None, "error"
 
-    return None
+def serialize_tender(tender):
+    return {
+        "title": tender["title"],
+        "description": tender["description"],
+        "closing_date": tender["closing_date"].isoformat() if isinstance(tender["closing_date"], date) else tender["closing_date"],
+        "scraped_at": tender["scraped_at"].isoformat() if isinstance(tender["scraped_at"], datetime) else tender["scraped_at"],
+        "source_url": tender["source_url"],
+        "status": tender["status"],
+        "format": tender["format"],
+        "tender_type": tender["tender_type"],
+        "location": tender["location"]
+    }
 
-def extract_closing_dates_from_content(response, format_type, db_connection):
-    """
-    Extracts closing dates based on the content format of the response.
-
-    Args:
-        response: The HTTP response object containing content.
-        format_type (str): The format type of the content ('PDF', 'DOCX', 'HTML').
-        db_connection: The active database connection object.
-
-    Returns:
-        list: A list of closing dates and associated keywords extracted from the content.
-    """
-    if format_type == 'PDF':
-        pdf_text = extract_pdf_text(response.content)  # Extract text from the PDF
-        return extract_closing_dates(pdf_text, db_connection)  # Pass db_connection to extract closing dates
-    elif format_type == 'DOCX':
-        docx_text = extract_docx_text(response.content)  # Extract text from the DOCX
-        return extract_closing_dates(docx_text, db_connection)  # Pass db_connection to extract closing dates
-    else:  # Assuming it's HTML
-        soup = BeautifulSoup(response.content, 'html.parser')  # Parse HTML
-        page_text = soup.get_text()  # Get all text content from the page
-        return extract_closing_dates(page_text, db_connection)  # Pass db_connection to extract closing dates
-
-
-# The script's entry point when executed directly
-if __name__ == "__main__":
-    db_connection = get_db_connection()  # Establish the database connection
+def decode_bing_url(encoded_url):
     try:
-        # Construct a search query using keywords and the current year
-        query = construct_search_query("tender", get_keywords_and_terms(), datetime.now().year)
-        # Call the scraping function to fetch tenders
-        scraped_tenders = scrape_tenders(db_connection, query, SEARCH_ENGINES)
-        ScrapingLog.add_log(f"Scraped tenders: {scraped_tenders}")  # Log the scraped tenders
+        padding_needed = len(encoded_url) % 4
+        if padding_needed:
+            encoded_url += "=" * (4 - padding_needed)
+
+        decoded_bytes = base64.b64decode(encoded_url, validate=True)
+
+        try:
+            decoded_url = decoded_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            decoded_url = decoded_bytes.decode('utf-8', errors='ignore')
+
+        return decoded_url
+    except Exception as e:
+        ScrapingLog.add_log(f"Error decoding Bing URL {encoded_url}: {str(e)}")
+        return None
+
+def scrape_tenders_from_query(db_connection, query, engines, task_id):
+    # Initialize task state
+    task_state = get_task_state(task_id) or {}
+    start_time = task_state.get('startTime', datetime.now().isoformat())
+    set_task_state(task_id, {
+        'status': 'running',
+        'startTime': start_time,
+        'tenders': [],
+        'visited_urls': [],
+        'total_urls': 0,
+        'summary': {},
+        'cancel': False
+    })
+
+    tenders = []
+    total_tenders_count = 0
+    expired_tenders_count = 0
+    headers = {'User-Agent': random.choice(USER_AGENTS)}
+    driver = None
+
+    try:
+        ScrapingLog.add_log(f"Starting scraping task {task_id} for query: {query}")
+        # Emit initial running status
+        socketio.emit('scrape_update', {
+            'taskId': task_id,
+            'status': 'running',
+            'startTime': start_time,
+            'tenders': [],
+            'visitedUrls': [],
+            'totalUrls': 0,
+            'summary': {
+                'openTenders': 0,
+                'closedTenders': 0,
+                'totalTenders': 0
+            },
+            'message': f"Started scraping for query: {query}",
+        }, namespace='/scraping')
+
+        for engine in engines:
+            # Check for cancellation
+            task_state = get_task_state(task_id)
+            if task_state and task_state.get("cancel", False):
+                ScrapingLog.add_log(f"Scraping task {task_id} canceled before scraping {engine}")
+                set_task_state(task_id, {
+                    'status': 'canceled',
+                    'startTime': start_time,
+                    'tenders': [serialize_tender(t) for t in tenders],
+                    'visited_urls': task_state.get('visited_urls', []),
+                    'total_urls': task_state.get('total_urls', 0),
+                    'summary': {
+                        'openTenders': len(tenders),
+                        'closedTenders': expired_tenders_count,
+                        'totalTenders': total_tenders_count
+                    }
+                })
+                socketio.emit('scrape_update', {
+                    'taskId': task_id,
+                    'status': 'canceled',
+                    'startTime': start_time,
+                    'tenders': [serialize_tender(t) for t in tenders],
+                    'visitedUrls': task_state.get('visited_urls', []),
+                    'totalUrls': task_state.get('total_urls', 0),
+                    'summary': {
+                        'openTenders': len(tenders),
+                        'closedTenders': expired_tenders_count,
+                        'totalTenders': total_tenders_count
+                    },
+                    'message': "Scraping canceled by user",
+                }, namespace='/scraping')
+                return tenders
+
+            search_url = construct_search_url(engine, query)
+            if not search_url:
+                ScrapingLog.add_log(f"Unsupported search engine: {engine}")
+                continue
+
+            ScrapingLog.add_log(f"Scraping {engine} for query: {query} | URL: {search_url}")
+            max_retries = 3
+            retry_delay = 1
+            use_proxy = False
+            links = []
+
+            prefer_requests = engine in ["Yahoo"]
+
+            if DISABLE_SELENIUM or prefer_requests:
+                if engine == "Yahoo":
+                    try:
+                        response = requests.get(search_url, headers=headers, timeout=10)
+                        html = response.text
+                        soup = BeautifulSoup(html, 'html.parser')
+                        link_elements = soup.select('div.dd.algo.algo-sr.relsrch h3.title a')
+                        links = [
+                            {
+                                'href': link.get('href'),
+                                'title': link.get_text(strip=True) or 'Untitled'
+                            }
+                            for link in link_elements
+                            if link.get('href')
+                        ]
+                    except Exception as req_e:
+                        ScrapingLog.add_log(f"Error scraping {engine} with requests: {str(req_e)}")
+                        continue
+            else:
+                for attempt in range(max_retries):
+                    try:
+                        driver = setup_selenium(use_proxy=use_proxy)
+                        driver.get(search_url)
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "body"))
+                        )
+                        if engine == "Ecosia":
+                            WebDriverWait(driver, 10).until(
+                                EC.presence_of_all_elements_located(
+                                    (By.CSS_SELECTOR, "div.mainline__result-wrapper article div.result__title a.result__link")
+                                )
+                            )
+                            link_elements = driver.find_elements(By.CSS_SELECTOR, 
+                                "div.mainline__result-wrapper article div.result__title a.result__link")
+                            links = [{'href': elem.get_attribute('href'), 'title': elem.text.strip() or 'Untitled'} 
+                                     for elem in link_elements]
+                        elif engine == "Bing":
+                            link_elements = driver.find_elements(By.CSS_SELECTOR, 'li.b_algo h2 a')
+                            links = [{'href': elem.get_attribute('href'), 'title': elem.text.strip() or 'Untitled'} 
+                                     for elem in link_elements]
+                        elif engine == "Startpage":
+                            link_elements = driver.find_elements(By.CSS_SELECTOR, 'div.result a.result-title')
+                            links = [{'href': elem.get_attribute('href'), 'title': elem.text.strip() or 'Untitled'} 
+                                     for elem in link_elements]
+                        elif engine == "DuckDuckGo":
+                            link_elements = driver.find_elements(By.CSS_SELECTOR, 'article a[data-testid="result-title-a"]')
+                            links = [{'href': elem.get_attribute('href'), 'title': elem.text.strip() or 'Untitled'} 
+                                     for elem in link_elements]
+                            if not links:
+                                link_elements = driver.find_elements(By.CSS_SELECTOR, 'article h2 a')
+                                links = [{'href': elem.get_attribute('href'), 'title': elem.text.strip() or 'Untitled'} 
+                                         for elem in link_elements]
+                            if not links:
+                                link_elements = driver.find_elements(By.CSS_SELECTOR, 'article a')
+                                links = [{'href': elem.get_attribute('href'), 'title': elem.text.strip() or 'Untitled'} 
+                                         for elem in link_elements]
+                        break
+                    except (TimeoutException, WebDriverException) as e:
+                        ScrapingLog.add_log(f"Error scraping {engine} with Selenium: {str(e)}")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                            if attempt == 1:
+                                use_proxy = True
+                        else:
+                            ScrapingLog.add_log(f"Failed to scrape {engine} after {max_retries} attempts")
+                            continue
+                    finally:
+                        if driver:
+                            driver.quit()
+                            driver = None
+
+            ScrapingLog.add_log(f"Found {len(links)} links on {engine} search page")
+            # Emit total URLs found
+            socketio.emit('total_urls', {
+                'totalUrls': len(links),
+                'taskId': task_id
+            }, namespace='/scraping')
+            task_state = get_task_state(task_id)
+            if task_state:
+                task_state['total_urls'] = len(links)
+                set_task_state(task_id, task_state)
+
+            for link in links:
+                # Check for cancellation
+                task_state = get_task_state(task_id)
+                if task_state and task_state.get("cancel", False):
+                    ScrapingLog.add_log(f"Scraping task {task_id} canceled during link processing")
+                    set_task_state(task_id, {
+                        'status': 'canceled',
+                        'startTime': start_time,
+                        'tenders': [serialize_tender(t) for t in tenders],
+                        'visited_urls': task_state.get('visited_urls', []),
+                        'total_urls': task_state.get('total_urls', 0),
+                        'summary': {
+                            'openTenders': len(tenders),
+                            'closedTenders': expired_tenders_count,
+                            'totalTenders': total_tenders_count
+                        }
+                    })
+                    socketio.emit('scrape_update', {
+                        'taskId': task_id,
+                        'status': 'canceled',
+                        'startTime': start_time,
+                        'tenders': [serialize_tender(t) for t in tenders],
+                        'visitedUrls': task_state.get('visited_urls', []),
+                        'totalUrls': task_state.get('total_urls', 0),
+                        'summary': {
+                            'openTenders': len(tenders),
+                            'closedTenders': expired_tenders_count,
+                            'totalTenders': total_tenders_count
+                        },
+                        'message': "Scraping canceled by user",
+                    }, namespace='/scraping')
+                    return tenders
+
+                href = link['href']
+                link_title = link['title']
+                if not href:
+                    ScrapingLog.add_log(f"Skipping link with no href: {link}")
+                    continue
+
+                actual_url = urljoin(search_url, href) if href.startswith('/') else href
+                ScrapingLog.add_log(f"Initial URL: {actual_url}")
+
+                if 'google.com/url' in actual_url:
+                    query_params = parse_qs(urlparse(actual_url).query)
+                    actual_url = query_params.get('q', [actual_url])[0]
+                    ScrapingLog.add_log(f"Decoded Google URL: {actual_url}")
+                elif 'bing.com/ck/a' in actual_url:
+                    query_params = parse_qs(urlparse(actual_url).query)
+                    encoded_url = query_params.get('u', [None])[0]
+                    if encoded_url and encoded_url.startswith('a1aHR0c'):
+                        actual_url = decode_bing_url(encoded_url)
+                        if not actual_url:
+                            ScrapingLog.add_log(f"Failed to decode Bing URL: {encoded_url}")
+                            continue
+                    else:
+                        ScrapingLog.add_log(f"No encoded URL found in Bing redirect: {actual_url}")
+                        continue
+                    ScrapingLog.add_log(f"Decoded Bing URL: {actual_url}")
+                elif 'yahoo.com' in actual_url and '/RU=' in actual_url:
+                    try:
+                        ru_start = actual_url.index('/RU=') + 4
+                        ru_end = actual_url.index('/RK=', ru_start) if '/RK=' in actual_url[ru_start:] else len(actual_url)
+                        encoded_url = actual_url[ru_start:ru_end]
+                        if encoded_url:
+                            decoded_url = unquote(encoded_url)
+                            actual_url = decoded_url
+                            ScrapingLog.add_log(f"Decoded Yahoo URL: {actual_url}")
+                        else:
+                            ScrapingLog.add_log(f"No RU parameter value found in Yahoo redirect: {actual_url}")
+                            continue
+                    except Exception as e:
+                        ScrapingLog.add_log(f"Error decoding Yahoo URL {actual_url}: {str(e)}")
+                        continue
+                elif 'duckduckgo.com/l/?uddg=' in actual_url:
+                    actual_url = unquote(actual_url.split('uddg=')[1].split('&')[0])
+                    ScrapingLog.add_log(f"Decoded DuckDuckGo URL: {actual_url}")
+
+                if not is_valid_url(actual_url):
+                    ScrapingLog.add_log(f"Skipping invalid URL: {actual_url}")
+                    continue
+                if is_excluded_domains(actual_url, EXCLUDED_DOMAINS):
+                    ScrapingLog.add_log(f"Skipping URL from excluded domain: {actual_url}")
+                    continue
+
+                ScrapingLog.add_log(f"Visiting URL: {actual_url} with title: {link_title}")
+                # Emit URL visit
+                socketio.emit('visit_url', {
+                    'url': actual_url,
+                    'taskId': task_id
+                }, namespace='/scraping')
+                task_state = get_task_state(task_id)
+                if task_state:
+                    task_state['visited_urls'].append(actual_url)
+                    set_task_state(task_id, task_state)
+
+                tender_details, status = scrape_tender_details(actual_url, link_title, headers, db_connection)
+
+                if status in ["open", "expired", "not_relevant"]:
+                    total_tenders_count += 1
+                if status == "expired":
+                    expired_tenders_count += 1
+                if tender_details:
+                    tenders.append(tender_details)
+                    task_state = get_task_state(task_id)
+                    if task_state:
+                        task_state['tenders'] = [serialize_tender(t) for t in tenders]
+                        set_task_state(task_id, task_state)
+
+        ScrapingLog.add_log(f"Scraping completed. Total tenders found: {total_tenders_count}, Open: {len(tenders)}, Expired: {expired_tenders_count}")
+        # Finalize task state and emit completion
+        serialized_tenders = [serialize_tender(t) for t in tenders]
+        visited_urls = get_task_state(task_id).get('visited_urls', []) if get_task_state(task_id) else []
+        total_urls = get_task_state(task_id).get('total_urls', 0) if get_task_state(task_id) else 0
+        set_task_state(task_id, {
+            'status': 'complete',
+            'startTime': start_time,
+            'tenders': serialized_tenders,
+            'visited_urls': visited_urls,
+            'total_urls': total_urls,
+            'message': f"Scraping completed for query: {query}",
+            'summary': {
+                'openTenders': len(tenders),
+                'closedTenders': expired_tenders_count,
+                'totalTenders': total_tenders_count
+            }
+        })
+        socketio.emit('scrape_update', {
+            'taskId': task_id,
+            'status': 'complete',
+            'startTime': start_time,
+            'tenders': serialized_tenders,
+            'visitedUrls': visited_urls,
+            'totalUrls': total_urls,
+            'summary': {
+                'openTenders': len(tenders),
+                'closedTenders': expired_tenders_count,
+                'totalTenders': total_tenders_count
+            },
+            'message': f"Scraping completed for query: {query}",
+        }, namespace='/scraping')
+        # Clean up task state
+        delete_task_state(task_id)
+        return tenders
+
+    except Exception as e:
+        ScrapingLog.add_log(f"Error in scrape_tenders_from_query: {str(e)}")
+        # Handle error state and emit
+        visited_urls = get_task_state(task_id).get('visited_urls', []) if get_task_state(task_id) else []
+        total_urls = get_task_state(task_id).get('total_urls', 0) if get_task_state(task_id) else 0
+        set_task_state(task_id, {
+            'status': 'error',
+            'startTime': start_time,
+            'tenders': [serialize_tender(t) for t in tenders],
+            'visited_urls': visited_urls,
+            'total_urls': total_urls,
+            'message': f"Error scraping for query: {query}: {str(e)}",
+            'summary': {
+                'openTenders': len(tenders),
+                'closedTenders': expired_tenders_count,
+                'totalTenders': total_tenders_count
+            }
+        })
+        socketio.emit('scrape_update', {
+            'taskId': task_id,
+            'status': 'error',
+            'startTime': start_time,
+            'tenders': [serialize_tender(t) for t in tenders],
+            'visitedUrls': visited_urls,
+            'totalUrls': total_urls,
+            'summary': {
+                'openTenders': len(tenders),
+                'closedTenders': expired_tenders_count,
+                'totalTenders': total_tenders_count
+            },
+            'message': f"Error scraping for query: {query}: {str(e)}",
+        }, namespace='/scraping')
+        # Clean up task state
+        delete_task_state(task_id)
+        return tenders
     finally:
-        # Ensure the database connection is closed properly
-        if db_connection:
-            db_connection.close()  # Close the database connection
-            ScrapingLog.add_log("Database connection closed.")
+        if driver:
+            driver.quit()
