@@ -1,5 +1,6 @@
 import smtplib
 import logging
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -41,10 +42,8 @@ def format_datetime_readable(dt_str):
     logger.debug(f"Attempting to parse datetime: {dt_str}")
     try:
         if isinstance(dt_str, datetime):
-            # If it's already a datetime object, use it directly
             dt = dt_str
         elif dt_str:
-            # Try parsing with dateutil.parser if it's a string
             dt = parse(dt_str, fuzzy=True)
         else:
             dt = datetime.now()
@@ -52,39 +51,42 @@ def format_datetime_readable(dt_str):
         logger.warning(f"Invalid datetime format for {dt_str}, using current time instead. Error: {e}")
         dt = datetime.now()
 
-    # Get the day with ordinal suffix (e.g., "28th")
     day = dt.day
     ordinal_suffix = get_ordinal_suffix(day)
-
-    # Format the datetime to "Monday, 28th April, 2025 at 10:00am"
     hour_minute_am_pm = dt.strftime("%I").lstrip('0') + dt.strftime(":%M%p").lower()
     formatted_dt = dt.strftime(f"%A, {day}{ordinal_suffix} %B, %Y at {hour_minute_am_pm}")
     return formatted_dt
 
-def send_open_tender_email(tender_data, recipient_email=None):
+def validate_email(email):
+    """Validates an email address using a regex pattern."""
+    email_regex = r'^[^\s@]+@[^\s@]+\.[^\s@]+$'
+    return bool(re.match(email_regex, email))
+
+def send_open_tender_email(tender_data, recipient_email):
     """
     Sends an email notification for an open tender to the specified recipient.
     
     Args:
         tender_data (dict): The tender data containing details like title, source_url, etc.
-        recipient_email (str, optional): The email address to send the notification to. If None, the default from .env will be used.
+        recipient_email (str): A single email address to send the notification to.
+    
+    Raises:
+        ValueError: If the recipient_email is invalid.
     """
-    try:
-        # If no recipient email is passed, use the default from the environment variable
-        if recipient_email is None:
-            recipient_email = DEFAULT_RECIPIENT_EMAIL
+    if not validate_email(recipient_email):
+        logger.error(f"Invalid email address: {recipient_email}")
+        raise ValueError(f"Invalid email address: {recipient_email}")
 
-        # Create the email message
+    try:
         msg = MIMEMultipart()
         msg["From"] = EMAIL_USER
         msg["To"] = recipient_email
         msg["Subject"] = f"New Open Tender: {tender_data.get('title', 'N/A')}"
         msg["Reply-To"] = EMAIL_REPLYTO
 
-        # Format the scraped_at timestamp
         scraped_at_formatted = format_datetime_readable(tender_data.get('scraped_at'))
 
-        # Email body with improved formatting
+        # Email body (unchanged, keeping your HTML template)
         body = f"""
         <!DOCTYPE html>
         <html lang="en">
@@ -122,7 +124,7 @@ def send_open_tender_email(tender_data, recipient_email=None):
             h2 {{
                 color: #e04c1b;
                 font-size: 28px;
-                margin-bottom: 15px;
+                margin-bottom: 15商标
                 text-align: center;
             }}
             p {{
@@ -274,36 +276,51 @@ def send_open_tender_email(tender_data, recipient_email=None):
 
         msg.attach(MIMEText(body, "html"))
 
-        # Set up the SMTP server
         if EMAIL_SECURE:
             server = smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT)
         else:
             server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
             server.starttls()
 
-        # Login to the email server
         server.login(EMAIL_USER, EMAIL_PASS)
-
-        # Send the email
         server.sendmail(EMAIL_USER, recipient_email, msg.as_string())
         logger.info(f"Email sent successfully to {recipient_email} for tender: {tender_data.get('title', 'N/A')}")
 
-        # Close the server connection
         server.quit()
 
     except Exception as e:
-        logger.error(f"Failed to send email for tender '{tender_data.get('title', 'N/A')}': {str(e)}")
+        logger.error(f"Failed to send email to {recipient_email} for tender '{tender_data.get('title', 'N/A')}': {str(e)}")
+        raise  # Optionally re-raise to allow caller to handle
 
-def notify_open_tenders(tenders, task_id, recipient_email=None):
+def notify_open_tenders(tenders, task_id, recipient_emails=None):
     """
-    Checks a list of tenders and sends an email for each open tender.
+    Checks a list of tenders and sends an email for each open tender to the specified recipients.
     
     Args:
         tenders (list): List of tender dictionaries.
         task_id (int): The ID of the task that triggered this notification.
-        recipient_email (str): The email address to send notifications to. Defaults to the value in .env.
+        recipient_emails (str): Comma-separated string of email addresses or a single email.
+                               Defaults to DEFAULT_RECIPIENT_EMAIL if None or empty.
     """
+    # Use DEFAULT_RECIPIENT_EMAIL if recipient_emails is None or empty
+    if not recipient_emails:
+        recipient_emails = DEFAULT_RECIPIENT_EMAIL
+        logger.info(f"No recipient emails provided, using default: {DEFAULT_RECIPIENT_EMAIL}")
+
+    # Split recipient_emails into a list of individual emails
+    email_list = [email.strip() for email in recipient_emails.split(",") if email.strip()]
+    
+    if not email_list:
+        logger.warning(f"No valid recipient emails for task {task_id}. Skipping notifications.")
+        return
+
     for tender in tenders:
         if tender.get("status") == "open":
             logger.info(f"Found open tender for task {task_id}: {tender.get('title', 'N/A')}")
-            send_open_tender_email(tender, recipient_email)
+            for email in email_list:
+                try:
+                    send_open_tender_email(tender, email)
+                except ValueError as e:
+                    logger.error(f"Skipping email toTHER {email}: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Failed to send email to {email} for task {task_id}: {str(e)}")

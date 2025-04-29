@@ -23,8 +23,13 @@ from .constants import SCRAPING_FUNCTIONS
 from .exceptions import TaskNotFoundError, InvalidConfigurationError
 from .utils import format_task_response, fetch_task_details, get_search_terms, set_task_state, get_task_state, delete_task_state
 from psycopg2.extras import Json
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+load_dotenv()
+DEFAULT_RECIPIENT_EMAIL = os.getenv("DEFAULT_RECIPIENT_EMAIL")
+
 
 # --- Database Connection Management ---
 
@@ -520,7 +525,8 @@ def run_scheduled_task(task_id):
 
                 if email_notifications_enabled and tenders:
                     logger.info(f"Email notifications enabled for task {task_id}. Sending notifications to: {custom_emails}")
-                    notify_open_tenders(tenders, task_id, recipient_emails=custom_emails)
+                    recipient_emails = custom_emails if custom_emails else DEFAULT_RECIPIENT_EMAIL
+                    notify_open_tenders(tenders, task_id, recipient_emails=recipient_emails)
                     open_tenders_count = len([t for t in tenders if t.get('status') == 'open'])
                     if open_tenders_count > 0:
                         add_notification(
@@ -615,7 +621,8 @@ def run_task(task_id):
 
                 if email_notifications_enabled and tenders:
                     logger.info(f"Email notifications enabled for task {task_id}. Sending notifications to: {custom_emails}")
-                    notify_open_tenders(tenders, task_id, recipient_emails=custom_emails)
+                    recipient_emails = custom_emails if custom_emails else DEFAULT_RECIPIENT_EMAIL
+                    notify_open_tenders(tenders, task_id, recipient_emails=recipient_emails)
                     open_tenders_count = len([t for t in tenders if t.get('status') == 'open'])
                     if open_tenders_count > 0:
                         add_notification(
