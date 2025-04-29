@@ -1,5 +1,5 @@
 # webapp/socket_handlers.py
-from webapp.task_service.utils import set_task_state  # Updated import
+from webapp.task_service.utils import set_task_state, get_task_state 
 from webapp.extensions import socketio  # Updated import for socketio
 import logging
 
