@@ -1,3 +1,5 @@
+# webapp/__init__.py
+
 from flask import Flask, jsonify, g
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
