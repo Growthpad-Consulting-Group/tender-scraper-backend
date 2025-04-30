@@ -120,24 +120,28 @@ def send_magic_link_email(to_email, token):
 def login():
     logger.info(f"CORS Origin: {request.headers.get('Origin')}")
     logger.info(f"Request Method: {request.method}")
+    logger.info(f"Request Host: {request.host}")
+    logger.info(f"Request Headers: {request.headers}")
+    logger.info(f"Request JSON: {request.json}")
     data = request.json
     email = data.get('email') 
     password = data.get('password')
     recaptcha_token = data.get('recaptchaToken')
-
-    print("Request Host:", request.host)
-
+    
     if not (request.host.startswith('localhost') or request.host.startswith('127.0.0.1')) and \
             'PostmanRuntime' not in request.headers.get('User-Agent', ''):
+        logger.info(f"Verifying reCAPTCHA with token: {recaptcha_token}")
         recaptcha_response = requests.post('https://www.google.com/recaptcha/api/siteverify', data={
             'secret': RECAPTCHA_SECRET_KEY,
             'response': recaptcha_token
         })
         recaptcha_result = recaptcha_response.json()
+        logger.info(f"reCAPTCHA result: {recaptcha_result}")
         if not recaptcha_result.get('success'):
             return jsonify({"msg": "Invalid reCAPTCHA, please try again."}), 400
 
     if not email or not password:
+        logger.info("Missing email or password")
         return jsonify({"msg": "Please provide both email and password"}), 400
 
     conn = get_db_connection()
@@ -150,8 +154,10 @@ def login():
     if user and bcrypt.checkpw(password.encode('utf-8'), user[0].encode('utf-8')):
         access_token = create_access_token(identity=email)
         refresh_token = create_refresh_token(identity=email)
+        logger.info(f"Login successful for {email}")
         return jsonify(access_token=access_token, refresh_token=refresh_token), 200
     else:
+        logger.info(f"Invalid credentials for {email}")
         return jsonify({"msg": "Invalid email or password"}), 401
 
 @auth_bp.route('/refresh', methods=['POST'])
