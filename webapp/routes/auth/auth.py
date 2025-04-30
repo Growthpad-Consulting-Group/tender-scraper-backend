@@ -119,7 +119,7 @@ def send_magic_link_email(to_email, token):
 @auth_bp.route('/login', methods=['POST'])
 def login():
     data = request.json
-    email = data.get('email')  # Changed from 'username'
+    email = data.get('email') 
     password = data.get('password')
     recaptcha_token = data.get('recaptchaToken')
 
