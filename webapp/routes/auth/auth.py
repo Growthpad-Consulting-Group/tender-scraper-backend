@@ -118,6 +118,8 @@ def send_magic_link_email(to_email, token):
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
+    logger.info(f"CORS Origin: {request.headers.get('Origin')}")
+    logger.info(f"Request Method: {request.method}")
     data = request.json
     email = data.get('email') 
     password = data.get('password')
