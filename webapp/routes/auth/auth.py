@@ -116,8 +116,18 @@ def send_magic_link_email(to_email, token):
         print(f"Email sending error: {str(e)}")
         return False
 
-@auth_bp.route('/login', methods=['POST'])
+@auth_bp.route('/login', methods=['POST', 'OPTIONS'])
 def login():
+    if request.method == 'OPTIONS':
+        logger.info(f"Handling OPTIONS request for /login")
+        logger.info(f"CORS Origin: {request.headers.get('Origin')}")
+        response = jsonify({"msg": "Preflight OK"})
+        response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        logger.info(f"OPTIONS Response Headers: {response.headers}")
+        return response, 200
+
     logger.info(f"CORS Origin: {request.headers.get('Origin')}")
     logger.info(f"Request Method: {request.method}")
     logger.info(f"Request Host: {request.host}")
@@ -142,7 +152,10 @@ def login():
 
     if not email or not password:
         logger.info("Missing email or password")
-        return jsonify({"msg": "Please provide both email and password"}), 400
+        response = jsonify({"msg": "Please provide both email and password"})
+        response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
+        logger.info(f"Response Headers: {response.headers}")
+        return response, 400
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -155,10 +168,16 @@ def login():
         access_token = create_access_token(identity=email)
         refresh_token = create_refresh_token(identity=email)
         logger.info(f"Login successful for {email}")
-        return jsonify(access_token=access_token, refresh_token=refresh_token), 200
+        response = jsonify(access_token=access_token, refresh_token=refresh_token)
+        response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
+        logger.info(f"Response Headers: {response.headers}")
+        return response, 200
     else:
         logger.info(f"Invalid credentials for {email}")
-        return jsonify({"msg": "Invalid email or password"}), 401
+        response = jsonify({"msg": "Invalid email or password"})
+        response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
+        logger.info(f"Response Headers: {response.headers}")
+        return response, 401
 
 @auth_bp.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)
