@@ -18,7 +18,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ EMAIL_PORT = int(os.getenv("EMAIL_PORT", 465))
 EMAIL_SECURE = os.getenv("EMAIL_SECURE", "true").lower() == "true"
 EMAIL_REPLYTO = os.getenv("EMAIL_REPLYTO")
 RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
-APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:5000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 def send_magic_link_email(to_email, token):
     conn = get_db_connection()
@@ -44,7 +44,7 @@ def send_magic_link_email(to_email, token):
     conn.close()
 
     name = user[0] if user and user[0] else "User"
-    magic_link = f"{APP_BASE_URL}/verify?token={token}&email={to_email}"
+    magic_link = f"{FRONTEND_URL}/verify?token={token}&email={to_email}"
     msg = MIMEMultipart("alternative")
     msg['Subject'] = "Your GCG Tender Management Dashboard Magic Link"
     msg['From'] = f"Growthpad Tender Management Dashboard <{EMAIL_USER}>"
@@ -78,7 +78,7 @@ def send_magic_link_email(to_email, token):
             Need to log in? Use the link below to access the GCG Tender Management Dashboard. This is a one-time magic link for your convenience.
         </p>
         <div style="text-align: center; margin: 30px 0;">
-            <a href="{magic_link}" style="background-color: #f05d23; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">Log In Now</a>
+            <a href="{magic_link}" id="magic-link" style="background-color: #f05d23; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;" onclick="this.style.pointerEvents='none'; this.innerText='Processing...';">Log In Now</a>
         </div>
         <p style="font-size: 14px; color: #261914; text-align: center;">
             This link will expire in <strong>15 minutes</strong>. If you didn’t request this, please contact <a href="mailto:strategic@growthpad.co.ke" style="color: #f05d23;">strategic@growthpad.co.ke</a>.
@@ -119,42 +119,28 @@ def send_magic_link_email(to_email, token):
 @auth_bp.route('/login', methods=['POST', 'OPTIONS'])
 def login():
     if request.method == 'OPTIONS':
-        logger.info(f"Handling OPTIONS request for /login")
-        logger.info(f"CORS Origin: {request.headers.get('Origin')}")
         response = jsonify({"msg": "Preflight OK"})
         response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
         response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        logger.info(f"OPTIONS Response Headers: {response.headers}")
         return response, 200
 
-    logger.info(f"CORS Origin: {request.headers.get('Origin')}")
-    logger.info(f"Request Method: {request.method}")
-    logger.info(f"Request Host: {request.host}")
-    logger.info(f"Request Headers: {request.headers}")
-    logger.info(f"Request JSON: {request.json}")
     data = request.json
     email = data.get('email') 
     password = data.get('password')
     recaptcha_token = data.get('recaptchaToken')
     
-    if not (request.host.startswith('localhost') or request.host.startswith('127.0.0.1')) and \
-            'PostmanRuntime' not in request.headers.get('User-Agent', ''):
-        logger.info(f"Verifying reCAPTCHA with token: {recaptcha_token}")
-        recaptcha_response = requests.post('https://www.google.com/recaptcha/api/siteverify', data={
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': recaptcha_token
-        })
-        recaptcha_result = recaptcha_response.json()
-        logger.info(f"reCAPTCHA result: {recaptcha_result}")
-        if not recaptcha_result.get('success'):
-            return jsonify({"msg": "Invalid reCAPTCHA, please try again."}), 400
+    recaptcha_response = requests.post('https://www.google.com/recaptcha/api/siteverify', data={
+        'secret': RECAPTCHA_SECRET_KEY,
+        'response': recaptcha_token
+    })
+    recaptcha_result = recaptcha_response.json()
+    if not recaptcha_result.get('success'):
+        return jsonify({"msg": "Invalid reCAPTCHA, please try again."}), 400
 
     if not email or not password:
-        logger.info("Missing email or password")
         response = jsonify({"msg": "Please provide both email and password"})
         response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
-        logger.info(f"Response Headers: {response.headers}")
         return response, 400
 
     conn = get_db_connection()
@@ -167,16 +153,12 @@ def login():
     if user and bcrypt.checkpw(password.encode('utf-8'), user[0].encode('utf-8')):
         access_token = create_access_token(identity=email)
         refresh_token = create_refresh_token(identity=email)
-        logger.info(f"Login successful for {email}")
         response = jsonify(access_token=access_token, refresh_token=refresh_token)
         response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
-        logger.info(f"Response Headers: {response.headers}")
         return response, 200
     else:
-        logger.info(f"Invalid credentials for {email}")
         response = jsonify({"msg": "Invalid email or password"})
         response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
-        logger.info(f"Response Headers: {response.headers}")
         return response, 401
 
 @auth_bp.route('/refresh', methods=['POST'])
@@ -190,7 +172,6 @@ def refresh():
 def magic_link():
     data = request.json
     email = data.get('email').strip() if data.get('email') else None
-    print(f"Received email: '{email}'")
 
     if not email:
         return jsonify({"msg": "Email is required"}), 400
@@ -200,7 +181,6 @@ def magic_link():
     
     cur.execute("SELECT email FROM users WHERE LOWER(email) = LOWER(%s)", (email,))
     user = cur.fetchone()
-    print(f"Query result: {user}")
     
     if not user:
         cur.close()
@@ -226,8 +206,15 @@ def magic_link():
     else:
         return jsonify({"msg": "Failed to send email"}), 500
 
-@auth_bp.route('/verify', methods=['GET'])
+@auth_bp.route('/verify', methods=['GET', 'OPTIONS'])
 def verify_magic_link_get():
+    if request.method == 'OPTIONS':
+        response = jsonify({"msg": "Preflight OK"})
+        response.headers.add('Access-Control-Allow-Origin', os.getenv("FRONTEND_URL", "http://localhost:3000"))
+        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        return response, 200
+
     token = request.args.get('token')
     email = request.args.get('email')
 
@@ -255,10 +242,12 @@ def verify_magic_link_get():
         conn.close()
         
         frontend_url = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/auth/callback?access_token={access_token}&refresh_token={refresh_token}"
+        logger.info(f"Redirecting to: {frontend_url}")
         return redirect(frontend_url)
     
     cur.close()
     conn.close()
+    logger.warning(f"Invalid or expired token for email: {email}")
     return jsonify({"msg": "Invalid or expired token"}), 401
 
 @auth_bp.route('/verify-magic-link', methods=['POST'])
@@ -318,11 +307,9 @@ def user_profile():
     # Try to get the name from the cache
     cached_name = get_cache(f"user_name_{email}")
     if cached_name:
-        logger.info(f"Returning cached name for user: {email}")
         return jsonify({"name": cached_name}), 200
     
     # Cache miss: fetch from the database
-    logger.info(f"Fetching name from database for user: {email}")
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT name FROM users WHERE email = %s", (email,))
@@ -331,9 +318,7 @@ def user_profile():
     conn.close()
 
     if user and user[0]:
-        logger.info(f"Name fetched from database for user: {email}, caching it")
         set_cache(f"user_name_{email}", user[0], expiry=3600)
         return jsonify({"name": user[0]}), 200
     else:
-        logger.warning(f"User not found in database for email: {email}")
         return jsonify({"msg": "User not found"}), 404
